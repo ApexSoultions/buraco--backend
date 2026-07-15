@@ -215,13 +215,21 @@ function sortRunCards(cards: Card[]): Card[] {
   const twos   = cards.filter(c => c.rank === '2');
   const others = cards.filter(c => c.rank !== '2' && c.rank !== 'JOKER');
 
-  // Identify the natural 2 using the same rule as validateMeld:
-  // framework must be single-suit and contain a rank-3.
+  // Identify the natural 2 only when it actually occupies the rank-2 slot
+  // (…4,3,2), not merely because a 3 is present — otherwise 3,2,5,6 sorts the
+  // 2 as natural instead of placing it as the acting wild in the gap at 4.
   let naturalTwo: Card | null = null;
   const frameworkSuits = new Set(others.map(c => c.suit));
   if (frameworkSuits.size === 1 && others.some(c => c.rank === '3') && twos.length > 0) {
     const fs = [...frameworkSuits][0] as string;
-    naturalTwo = twos.find(c => c.suit === fs) ?? null;
+    const candidate = twos.find(c => c.suit === fs) ?? null;
+    if (candidate) {
+      const withNatural = [...others, candidate];
+      const otherActing = [...jokers, ...twos.filter(c => c !== candidate)];
+      if (isValidRun(withNatural, 0) || (otherActing.length >= 1 && isValidRun(withNatural, 1))) {
+        naturalTwo = candidate;
+      }
+    }
   }
 
   // Acting wilds = jokers + any 2 that is not the natural 2.

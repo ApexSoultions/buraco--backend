@@ -581,7 +581,7 @@ export class GameEngineService {
               ? { ...mergeTarget, cards: [...mergeTarget.cards, ...cards] }
               : {
                   id: 'tmp', teamId: playerTeamId, type: meldType, cards,
-                  isNatural: !cards.some(c => c.isWild), isCanasta: cards.length >= 7,
+                 isNatural: !computeMeldHasActingWild(cards, meldType), isCanasta: cards.length >= 7,
                 };
             const meldsAfterPlay = mergeTarget
               ? allTeamMelds.map(m => m.id === mergeTarget.id ? prospectiveMeld : m)
@@ -604,11 +604,12 @@ export class GameEngineService {
         if (mergeTarget) {
           mergeTarget.cards = sortMeldCards([...mergeTarget.cards, ...sortedCards], meldType);
           mergeTarget.isCanasta = mergeTarget.cards.length >= 7;
-          mergeTarget.isNatural = mergeTarget.cards.every(c => !c.isWild);
           const nowDirty = computeMeldHasActingWild(mergeTarget.cards, meldType);
           mergeTarget.everDirty = state.mode === GameMode.PROFESSIONAL
             ? (mergeTarget.everDirty || nowDirty)
             : nowDirty;
+          // Natural Pinella (2 in rank-2 slot) is NOT an acting wild — use that, not isWild.
+          mergeTarget.isNatural = !mergeTarget.everDirty;
           result = { meld: mergeTarget, merged: true, handCount: hand.length };
         } else {
           const isDirty = computeMeldHasActingWild(sortedCards, meldType);
@@ -617,7 +618,7 @@ export class GameEngineService {
             teamId:    playerTeamId,
             type:      meldType,
             cards:     sortedCards,
-            isNatural: sortedCards.every(c => !c.isWild),
+            isNatural: !isDirty,
             isCanasta: sortedCards.length >= 7,
             everDirty: isDirty,
           };
@@ -762,11 +763,11 @@ export class GameEngineService {
         meld.cards.push(...cards);
         meld.cards     = sortMeldCards(meld.cards, meld.type);
         meld.isCanasta = meld.cards.length >= 7;
-        meld.isNatural = meld.cards.every(c => !c.isWild);
         const nowDirty = computeMeldHasActingWild(meld.cards, meld.type);
         meld.everDirty = state.mode === GameMode.PROFESSIONAL
           ? (meld.everDirty || nowDirty)
           : nowDirty;
+        meld.isNatural = !meld.everDirty;
         ;(move.cardIds ?? []).forEach(id => {
           const idx = hand.findIndex(c => c.id === id);
           if (idx !== -1) hand.splice(idx, 1);
@@ -1843,16 +1844,16 @@ export class GameEngineService {
       if (mergeTarget) {
         mergeTarget.cards     = sortMeldCards([...mergeTarget.cards, ...sorted], type);
         mergeTarget.isCanasta = mergeTarget.cards.length >= 7;
-        mergeTarget.isNatural = mergeTarget.cards.every(c => !c.isWild);
         const dirty           = computeMeldHasActingWild(mergeTarget.cards, type);
         mergeTarget.everDirty = state.mode === GameMode.PROFESSIONAL ? (mergeTarget.everDirty || dirty) : dirty;
+        mergeTarget.isNatural = !mergeTarget.everDirty;
         affectedMeldId        = mergeTarget.id;
       } else {
         if (!state.melds[playerId]) state.melds[playerId] = [];
         const dirty   = computeMeldHasActingWild(sorted, type);
         const newMeld = {
           id: uuidv4(), teamId, type, cards: sorted,
-          isNatural: sorted.every(c => !c.isWild), isCanasta: sorted.length >= 7, everDirty: dirty,
+          isNatural: !dirty, isCanasta: sorted.length >= 7, everDirty: dirty,
         };
         state.melds[playerId].push(newMeld);
         affectedMeldId = newMeld.id;
@@ -1878,9 +1879,9 @@ export class GameEngineService {
           const [card]   = hand.splice(i, 1);
           meld.cards     = sortMeldCards([...meld.cards, card], meld.type);
           meld.isCanasta = meld.cards.length >= 7;
-          meld.isNatural = meld.cards.every(c => !c.isWild);
           const dirty    = computeMeldHasActingWild(meld.cards, meld.type);
           meld.everDirty = state.mode === GameMode.PROFESSIONAL ? (meld.everDirty || dirty) : dirty;
+          meld.isNatural = !meld.everDirty;
           improved       = true;
 
           await emitMeldMove({
