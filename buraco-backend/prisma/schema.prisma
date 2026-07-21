@@ -546,12 +546,37 @@ model GameSession {
   duration   Int?
   createdAt  DateTime    @default(now())
 
-  players     GamePlayer[]
-  moves       GameMove[]
-  matchRecord MatchRecord?
-  room        Room?
+  players      GamePlayer[]
+  moves        GameMove[]
+  matchRecord  MatchRecord?
+  resultReport MatchResultReport?
+  room         Room?
 
   @@map("game_sessions")
+}
+
+/**
+ * Final result of a Photon Fusion (player-hosted) match, reported by the acting host
+ * device via POST /v1/game/:gameId/report-result. In-match play no longer runs on this
+ * server, so this row IS the durable record of "the match is over": a player who was
+ * offline at match end learns the outcome by polling GET /v1/game/:gameId/result.
+ *
+ * `gameId` is unique — the first report wins and later ones (client retries, or the
+ * other device after a host migration) are accepted but never overwrite it.
+ * `payload` stores the reporter's body verbatim so GET /result can return it unchanged.
+ */
+model MatchResultReport {
+  id         String      @id @default(uuid())
+  gameId     String      @unique
+  game       GameSession @relation(fields: [gameId], references: [id])
+  reportedBy String
+  winnerTeam Int         @default(0)
+  winnerIds  String[]
+  reason     String      @default("finished")
+  payload    Json
+  reportedAt DateTime    @default(now())
+
+  @@map("match_result_reports")
 }
 
 model GamePlayer {
