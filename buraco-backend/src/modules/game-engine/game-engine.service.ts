@@ -1,6 +1,6 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { GameMode, GameStatus, GameVariant, MoveType, RoomStatus } from '@prisma/client';
+import { GameMode, GameStatus, GameVariant, MoveType, Prisma, RoomStatus } from '@prisma/client';
 
 const INACTIVE_FAST_AUTOPLAY_SECONDS = 5;
 // Forfeit a player after this many FULLY auto-played turns. Counted once per turn
@@ -32,6 +32,9 @@ import {
 } from './buraco/rules';
 import { calculateScore, calculateMatchReward, calculateScoreBreakdown } from './buraco/scoring';
 import { SocketService } from '../../common/socket/socket.service';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
+import { MATCH_END_REASONS, ReportMatchResultDto } from './dto/report-match-result.dto';
 
 export type TurnPhase = 'MUST_DRAW' | 'CAN_MELD_OR_DISCARD' | 'ROUND_ENDED';
 
@@ -329,8 +332,86 @@ export class GameEngineService {
 
   async getGameState(gameId: string, requestingUserId: string) {
     const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
-    if (!state) throw new NotFoundException('Game state not found');
-    return this.buildClientView(state, requestingUserId);
+    if (state) return this.buildClientView(state, requestingUserId);
+
+    // No live state: either the Redis copy aged out or this is a Fusion match whose
+    // in-memory state was never the source of truth. If the DB says the match is over,
+    // answer with a terminal view instead of a 404 — a client returning from a long
+    // absence must be able to learn "this match is finished" from /state as well as
+    // /result, otherwise it keeps retrying a game that no longer exists.
+    const terminal = await this.buildTerminalStateFromDb(gameId);
+    if (terminal) return terminal;
+
+    throw new NotFoundException('Game state not found');
+  }
+
+  /**
+   * Minimal COMPLETED client view rebuilt from the DB for a match with no live Redis
+   * state. Shaped like buildClientView (every field present, empty board) so a client
+   * parsing it never trips over missing members; `status` + `winnerTeamId` are the
+   * fields that actually matter here. Returns null while the match is still live.
+   */
+  private async buildTerminalStateFromDb(gameId: string) {
+    const game = await this.prisma.gameSession.findUnique({
+      where: { id: gameId },
+      select: {
+        id: true, mode: true, variant: true, status: true, winnerTeam: true,
+        players: {
+          select: { userId: true, teamId: true, finalScore: true, user: { select: { username: true } } },
+        },
+        resultReport: { select: { winnerTeam: true, payload: true } },
+      },
+    });
+    if (!game) return null;
+    if (game.status === GameStatus.WAITING || game.status === GameStatus.IN_PROGRESS) return null;
+
+    const winnerTeam = game.resultReport?.winnerTeam ?? game.winnerTeam ?? null;
+
+    return {
+      gameId:               game.id,
+      mode:                 game.mode,
+      variant:              game.variant,
+      endMode:              'INDIRECT',
+      makart:               false,
+      status:               GameStatus.COMPLETED,
+      currentPlayerId:      '',
+      turnPhase:            'ROUND_ENDED' as TurnPhase,
+      stockPileCount:       0,
+      discardPile:          [] as Card[],
+      topDiscardCard:       null,
+      discardPileCount:     0,
+      potPileCounts:        [] as number[],
+      players: game.players.map((p, i) => ({
+        id:          p.userId,
+        userId:      p.userId,
+        username:    p.user?.username ?? '',
+        teamId:      p.teamId,
+        isConnected: false,
+        seatIndex:   i,
+        handCount:   0,
+        score:       p.finalScore ?? 0,
+      })),
+      myHand:               [] as Card[],
+      myMelds:              [] as Meld[],
+      teamMelds:            {} as Record<number, Meld[]>,
+      turnOrder:            game.players.map(p => p.userId),
+      currentTurnIndex:     0,
+      turnStartedAt:        0,
+      turnDuration:         0,
+      round:                0,
+      scores:               {} as Record<number, number>,
+      moveCount:            0,
+      potCollectedByTeam:   [] as number[],
+      setupComplete:        true,
+      tossComplete:         true,
+      toss:                 null,
+      targetScore:          0,
+      matchScores:          Object.fromEntries(game.players.map(p => [p.teamId, p.finalScore ?? 0])),
+      winnerTeam,
+      winnerTeamId:         winnerTeam != null ? String(winnerTeam) : null,
+      lastRoundScores:      [] as NonNullable<GameState['lastRoundScores']>,
+      turnTimeRemaining:    0,
+    };
   }
 
   private buildClientView(state: GameState, requestingUserId: string) {
@@ -396,6 +477,9 @@ export class GameEngineService {
       targetScore:          state.targetScore ?? 0,
       matchScores:          state.matchScores ?? { 1: 0, 2: 0 },
       winnerTeam:           state.winnerTeam ?? null,
+      // String twin of winnerTeam. Clients that resolve a finished match through the
+      // /state fallback (rather than /result) read this field by name.
+      winnerTeamId:         state.winnerTeam != null ? String(state.winnerTeam) : null,
       lastRoundScores:      state.lastRoundScores ?? [],
       turnTimeRemaining: (() => {
         const cadence = (state.consecutiveMissedTurns ?? {})[currentPlayerId] ?? 0;
@@ -1393,7 +1477,255 @@ export class GameEngineService {
     return { winnerTeam, winnerIds, scores, duration, players: this.toGameEndPlayers(playerRoundRows, winnerIds) };
   }
 
+  // ── Photon Fusion match-end reporting ─────────────────────────────────────
+  //
+  // In-match play runs on the players' devices (Fusion, player-hosted), so this server
+  // no longer computes the outcome — the acting host reports it here. That makes this
+  // row the only durable "the match is over" marker: a player who was offline at match
+  // end (forfeited, network loss, app killed) learns the outcome by polling GET /result.
+
+  /** Unknown reason strings are normalised to `finished` rather than rejected. */
+  private normalizeReason(reason?: string): string {
+    return reason && (MATCH_END_REASONS as readonly string[]).includes(reason) ? reason : 'finished';
+  }
+
+  /**
+   * Validate a report body here rather than via the global ValidationPipe, which is
+   * configured with `forbidNonWhitelisted` and would 400 a report that carries one extra
+   * field. Unknown properties are stripped instead — a genuinely finished match must not
+   * fail to persist over a field the server has not been taught about yet.
+   */
+  private async validateReportBody(body: Record<string, unknown>): Promise<ReportMatchResultDto> {
+    const dto = plainToInstance(ReportMatchResultDto, body ?? {}, {
+      excludeExtraneousValues: false,
+      enableImplicitConversion: true,
+    });
+    const errors = await validate(dto, { whitelist: true, forbidNonWhitelisted: false });
+    if (errors.length > 0) {
+      const detail = errors
+        .map(e => Object.values(e.constraints ?? {}).join(', ') || e.property)
+        .join('; ');
+      throw new BadRequestException(`INVALID_MATCH_RESULT: ${detail}`);
+    }
+    if (!Array.isArray(dto.players) || dto.players.length === 0) {
+      throw new BadRequestException('INVALID_MATCH_RESULT: players is required');
+    }
+    return dto;
+  }
+
+  /**
+   * Persist the final result of a Fusion match as reported by the acting host device.
+   *
+   * Idempotent by `gameId`: the first report wins and every later one — a client retry,
+   * or the *other* device reporting after a host migration — is acknowledged with the
+   * same `{ ok: true }` without touching the stored data. Duplicates are normal here, so
+   * they must never surface as an error the client logs.
+   */
+  async reportMatchResult(gameId: string, reporterUserId: string, body: Record<string, unknown>) {
+    const dto = await this.validateReportBody(body);
+
+    const game = await this.prisma.gameSession.findUnique({
+      where: { id: gameId },
+      select: {
+        id: true, mode: true, variant: true, status: true, startedAt: true, createdAt: true,
+        players: { select: { userId: true, teamId: true } },
+        matchRecord: { select: { id: true } },
+      },
+    });
+    if (!game) throw new NotFoundException('GAME_NOT_FOUND');
+
+    // Host migration means EITHER participant can end up as the reporter, so
+    // participation is the only check — there is no designated host user to match.
+    if (!game.players.some(p => p.userId === reporterUserId)) {
+      throw new ForbiddenException('NOT_A_PARTICIPANT');
+    }
+
+    const reason     = this.normalizeReason(dto.reason);
+    const winnerTeam = dto.winnerTeam && dto.winnerTeam > 0 ? dto.winnerTeam : 0;
+    // Resolve the winning side from the reported team id against the server's own
+    // team assignment rather than the client-supplied winnerIds, so a buggy or hostile
+    // host cannot pay out both players. The body is still stored verbatim for GET /result.
+    const winnerIds  = winnerTeam > 0
+      ? game.players.filter(p => p.teamId === winnerTeam).map(p => p.userId)
+      : [];
+
+    // Stored (and returned by GET /result) with the reporter's own rows intact, but with
+    // the identifying fields normalised to what the server resolved, so the persisted
+    // result cannot disagree with the game record it was written alongside.
+    const payload = { ...dto, gameId, reason, winnerTeam, winnerIds };
+
+    try {
+      await this.prisma.matchResultReport.create({
+        data: {
+          gameId,
+          reportedBy: reporterUserId,
+          winnerTeam,
+          winnerIds,
+          reason,
+          payload: payload as unknown as Prisma.InputJsonValue,
+        },
+      });
+    } catch (err) {
+      // P2002 = unique violation on gameId → somebody already reported this match.
+      // Matched on the code rather than `instanceof` so a client instantiated from a
+      // different module copy still resolves to the duplicate path.
+      if ((err as { code?: string })?.code === 'P2002') {
+        this.logger.log(`Duplicate result report for game ${gameId} from ${reporterUserId} — kept the first one`);
+        return { ok: true };
+      }
+      throw err;
+    }
+
+    const teamByUser  = new Map(game.players.map(p => [p.userId, p.teamId]));
+    const scoreByUser = new Map(dto.players.map(p => [p.playerId, p.matchScore ?? p.roundScore ?? 0]));
+    const duration    = Math.max(0, Math.floor((Date.now() - (game.startedAt ?? game.createdAt).getTime()) / 1000));
+
+    // A match that was already force-closed (admin action, timeout job, or the legacy
+    // socket flow) has had its economy and stats applied once already. Store the report
+    // — it is the only place the per-player breakdown lives — but leave the earlier
+    // settlement alone rather than paying out twice.
+    const alreadySettled =
+      !!game.matchRecord ||
+      (game.status !== GameStatus.IN_PROGRESS && game.status !== GameStatus.WAITING);
+
+    if (alreadySettled) {
+      this.logger.warn(
+        `Late result report for already-settled game ${gameId} (status=${game.status}) — stored, economy/stats untouched`,
+      );
+    } else {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.gameSession.update({
+          where: { id: gameId },
+          data: {
+            status:  GameStatus.COMPLETED,
+            endedAt: new Date(),
+            winnerIds,
+            winnerTeam: winnerTeam > 0 ? winnerTeam : null,
+            duration,
+            players: {
+              updateMany: game.players.map(p => ({
+                where: { userId: p.userId },
+                data: {
+                  finalScore: scoreByUser.get(p.userId) ?? 0,
+                  result: winnerTeam === 0 ? 'DRAW' : winnerIds.includes(p.userId) ? 'WIN' : 'LOSS',
+                },
+              })),
+            },
+          },
+        });
+
+        await tx.matchRecord.create({
+          data: {
+            gameId,
+            mode:    game.mode,
+            variant: game.variant,
+            winnerIds,
+            winnerTeam: winnerTeam > 0 ? winnerTeam : null,
+            scores:  Object.fromEntries(game.players.map(p => [p.teamId, scoreByUser.get(p.userId) ?? 0])),
+            duration,
+            players: {
+              create: game.players.map(p => ({
+                userId: p.userId,
+                teamId: p.teamId,
+                score:  scoreByUser.get(p.userId) ?? 0,
+                result: winnerTeam === 0 ? 'DRAW' : winnerIds.includes(p.userId) ? 'WIN' : 'LOSS',
+              })),
+            },
+          },
+        });
+      });
+
+      // Same reward curve the old server-side end-of-game flow used. On a neutral end
+      // (winnerTeam 0) nobody is credited a win — both sides take the loser payout.
+      await Promise.all(game.players.map(async (p) => {
+        const isWinner = winnerIds.includes(p.userId);
+        const reward   = calculateMatchReward(Math.max(0, scoreByUser.get(p.userId) ?? 0), isWinner);
+        await this.statsService.updateAfterMatch(p.userId, isWinner ? 'WIN' : 'LOSS', reward.points, reward.xp);
+        await this.economyService.distributeMatchReward(p.userId, gameId, reward.coins);
+      }));
+    }
+
+    // Retire the legacy parallel state: marking it COMPLETED both stops the turn-timeout
+    // cron from auto-playing a match that is already over and makes GET /state report the
+    // finish to any client still on the fallback path.
+    await this.markLegacyStateCompleted(gameId, winnerTeam, dto, teamByUser);
+
+    // Frees both seats, flips the room back to EMPTY, and clears each player's
+    // `activeGame` key so their next launch does not try to resume a dead match.
+    await this.resetRoomAfterGame(gameId, game.players.map(p => p.userId));
+
+    this.logger.log(
+      `Fusion match ${gameId} reported by ${reporterUserId}: winnerTeam=${winnerTeam} reason=${reason}`,
+    );
+    return { ok: true };
+  }
+
+  /**
+   * Fold the reported scoreboard into the leftover socket-era Redis state, if one exists.
+   * Fusion matches never advance this copy, so without it the state stays IN_PROGRESS
+   * forever and the auto-play cron keeps working a finished game.
+   */
+  private async markLegacyStateCompleted(
+    gameId: string,
+    winnerTeam: number,
+    dto: ReportMatchResultDto,
+    teamByUser: Map<string, number>,
+  ): Promise<void> {
+    const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
+    if (!state) return;
+
+    state.status     = GameStatus.COMPLETED;
+    state.winnerTeam = winnerTeam;
+    state.matchScores = state.matchScores ?? { 1: 0, 2: 0 };
+    for (const p of dto.players) {
+      const teamId = teamByUser.get(p.playerId);
+      if (teamId !== undefined) state.matchScores[teamId] = p.matchScore ?? p.roundScore ?? 0;
+    }
+    state.lastRoundScores = dto.players.map((p) => {
+      const boardScore      = p.boardScore ?? 0;
+      const cleanBuraco     = p.cleanBuraco ?? 0;
+      const semiCleanBuraco = p.semiCleanBuraco ?? 0;
+      const dirtyBuraco     = p.dirtyBuraco ?? 0;
+      const potNotTaken     = p.potNotTaken ?? 0;
+      const paidCards       = p.paidCards ?? 0;
+      const finishBonus     = p.finishBonus ?? 0;
+      const roundScore      = p.roundScore ?? 0;
+      return {
+        playerId:   p.playerId,
+        playerName: p.playerName ?? state.usernames?.[p.playerId] ?? '',
+        teamId:     teamByUser.get(p.playerId) ?? 0,
+        roundScore,
+        matchScore: p.matchScore ?? roundScore,
+        boardScore, cleanBuraco, semiCleanBuraco, dirtyBuraco, potNotTaken, paidCards, finishBonus,
+        breakdown: {
+          boardScore,
+          cleanBuraco,
+          semiCleanBuraco,
+          dirtyBuraco,
+          buracoBonus: cleanBuraco + semiCleanBuraco + dirtyBuraco,
+          paidCards,
+          finishBonus,
+          potNotTaken,
+          total: roundScore,
+        },
+      };
+    });
+
+    // 2h, matching finalizeGame's terminal-state retention.
+    await this.redis.setJson(this.stateKey(gameId), state, 7200);
+  }
+
   async getGameResult(gameId: string) {
+    // A Fusion match's authoritative result is the acting host's report, returned
+    // verbatim — the client deserialises this straight into its MatchResult model.
+    // Checked first because it is the live path; a miss here is the common "match still
+    // running" case and both lookups are unique-index hits.
+    const report = await this.prisma.matchResultReport.findUnique({
+      where: { gameId },
+      select: { payload: true },
+    });
+    if (report) return report.payload;
+
     const record = await this.prisma.matchRecord.findUnique({
       where: { gameId },
       include: {
@@ -2152,6 +2484,13 @@ export class GameEngineService {
         select: { roomId: true },
       });
       if (session?.roomId) {
+        // The seat hash itself is dropped when the room goes IN_PROGRESS
+        // (RoomsService.transitionToInProgress); this clears the leftover per-user
+        // pointer to it so neither player is still "seated" at the finished table.
+        await Promise.all([
+          this.redis.del(`room:${session.roomId}:seats`),
+          ...playerIds.map(id => this.redis.del(`user:${id}:seatRoom`)),
+        ]);
         await this.prisma.room.update({
           where: { id: session.roomId },
           data: { status: RoomStatus.EMPTY, currentPlayers: 0, gameId: null },
