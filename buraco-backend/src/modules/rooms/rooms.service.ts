@@ -315,9 +315,18 @@ export class RoomsService implements OnModuleInit {
     return (await this.redis.hgetall(this.seatsKey(roomId))) ?? {};
   }
 
-  // Starts the game when a room is FULL. Uses a Redis lock so only one caller wins.
-  // Called from joinRoom (HTTP path) and gateway handleRoomJoin (WS path) — both are safe.
-  private async maybeStartGame(room: any): Promise<string | null> {
+  /**
+   * Starts the game when a room is FULL — the ONE place a match is created, so there is a
+   * single place that hands it to the server-hosted engine (GameEngineService.startGame
+   * stamps hostedBy=SERVER and registers it with the auto-play cron).
+   *
+   * Called from joinRoom (HTTP path) and the gateway's room:join handler (WS path); a Redis
+   * lock means only one of them wins the race to deal.
+   *
+   * The Redis seat hash — not fetchSockets() — is the authoritative player list: a socket
+   * that just called socket.join() in a concurrent handler may not be visible yet.
+   */
+  async maybeStartGame(room: any): Promise<string | null> {
     const lockKey = `game:starting:${room.id}`;
     const locked = await this.redis.setNx(lockKey, '1', 30);
     if (!locked) return null;

@@ -11,7 +11,7 @@ import {
 import { Server, Socket } from 'socket.io';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
-import { GameEngineService } from '../modules/game-engine/game-engine.service';
+import { GameEngineService, GameState } from '../modules/game-engine/game-engine.service';
 import { MessagingService } from '../modules/messaging/messaging.service';
 import { RedisService } from '../common/redis/redis.service';
 import { ReconnectionService } from '../modules/reconnection/reconnection.service';
@@ -96,17 +96,18 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     await this.redis.del(`online:${userId}`);
     this.logger.log(`User ${userId} disconnected`);
 
-    // In-game disconnect: mark disconnected and broadcast to opponents.
-    // Do NOT end the match immediately — the turn-timeout autoplay will run for
-    // this player's turns and forfeit only after 12 consecutive missed turns.
+    // In-game disconnect: flag the player as away and tell the table.
+    //
+    // The match is NOT ended, paused, or torn down — the backend hosts it, so the
+    // turn-timeout cron keeps playing this player's turns whether or not any socket is
+    // open. The match ends only at 12 consecutive auto-played turns (a win for a present
+    // opponent, or a draw if everyone is away). The Redis state stays live either way, so
+    // whoever comes back resumes from exactly where the server got to.
     const activeGame = await this.redis.get(`user:${userId}:activeGame`);
     if (activeGame) {
       await this.gameEngine.markPlayerDisconnected(activeGame, userId);
-      this.server.to(`game:${activeGame}`).emit('player:connection', {
-        gameId:    activeGame,
-        playerId:  userId,
-        connected: false,
-      });
+      await this.reconnection.markDisconnected(userId, activeGame);
+      this.emitPresence(activeGame, userId, false);
     }
 
     // Grace period: remove player from lobby room if still offline after 15 s
@@ -123,6 +124,23 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
   }
 
   // ─── Presence ─────────────────────────────────────────────────────────────
+
+  /**
+   * Tell everyone at the table that a player left or came back.
+   *
+   * Emits BOTH naming schemes on purpose: the Unity client subscribes to
+   * `game:player_disconnected` / `game:player_reconnected` (see GameSocketClient) and had
+   * no handler for `player:connection`, so presence never actually reached the phones.
+   * `player:connection` is kept for any other consumer already listening to it.
+   */
+  private emitPresence(gameId: string, playerId: string, connected: boolean) {
+    const payload = { gameId, playerId, userId: playerId, connected };
+    this.server.to(`game:${gameId}`).emit(
+      connected ? 'game:player_reconnected' : 'game:player_disconnected',
+      payload,
+    );
+    this.server.to(`game:${gameId}`).emit('player:connection', payload);
+  }
 
   @SubscribeMessage('ping')
   async handlePing(@ConnectedSocket() socket: Socket) {
@@ -160,40 +178,15 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
       const room = await this.roomsService.getRoom(roomId);
       if (room.status !== RoomStatus.FULL) return;
 
-      // Only one socket wins the lock to avoid double-starting the game
-      const lockKey = `game:starting:${roomId}`;
-      const locked = await this.redis.setNx(lockKey, '1', 30);
-      if (!locked) return;
-
+      // Delegate to RoomsService rather than re-implementing the start here. It is the
+      // single place a match is created — which is what guarantees every match this
+      // backend deals is stamped hostedBy=SERVER and handed to the auto-play cron. It
+      // takes its own Redis lock, so the HTTP join path and this one cannot double-deal,
+      // and it emits room:update itself.
       try {
-        // Use the Redis seat hash as the authoritative player list.
-        // Filtering out ":u" username fields gives only the numeric seat entries.
-        // This avoids the race condition where fetchSockets() may not yet include
-        // a socket that called socket.join() in a concurrent room:join handler.
-        const roomSeatMap = (await this.redis.hgetall(`room:${roomId}:seats`)) ?? {};
-        const seatOrderedIds = Object.entries(roomSeatMap)
-          .filter(([f]) => !f.includes(':'))
-          .sort(([a], [b]) => parseInt(a) - parseInt(b))
-          .map(([, uid]) => uid)
-          .filter(Boolean);
-
-        if (seatOrderedIds.length < room.maxPlayers) {
-          await this.redis.del(lockKey);
-          this.logger.warn(`Room ${roomId} is FULL in DB but only ${seatOrderedIds.length}/${room.maxPlayers} seats in Redis`);
-          return;
-        }
-
-        const gameState = await this.gameEngine.startGame(roomId, room.mode, room.variant, seatOrderedIds, (room as any).endMode, (room as any).makart, (room as any).turnDuration, (room as any).targetScore ?? 0);
-        await this.roomsService.transitionToInProgress(roomId, gameState.gameId);
-
-        this.server.to(`room:${roomId}`).emit('room:update', {
-          roomId,
-          gameId: gameState.gameId,
-          status: 'IN_PROGRESS',
-        });
-        this.logger.log(`Game ${gameState.gameId} started for room ${roomId}`);
+        const gameId = await this.roomsService.maybeStartGame(room);
+        if (gameId) this.logger.log(`Game ${gameId} started for room ${roomId}`);
       } catch (err) {
-        await this.redis.del(lockKey);
         this.logger.error(`Failed to start game for room ${roomId}`, err);
         socket.emit('error', { code: 'GAME_START_FAILED', message: (err as Error).message });
       }
@@ -222,15 +215,19 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
 
   // ─── Game ─────────────────────────────────────────────────────────────────
 
+  // Reads the authoritative state ONCE and derives each player's filtered view from it,
+  // rather than issuing a fresh Redis read per connected socket.
   private async broadcastGameState(gameId: string, lastMove: Record<string, unknown>, skipUserId?: string) {
+    const state = await this.redis.getJson<GameState>(this.gameEngine.stateKey(gameId));
+    if (!state) return;
+
     const sockets = await this.server.in(`game:${gameId}`).fetchSockets();
     await Promise.all(
       sockets.map(async (s) => {
         const userId = s.data.userId as string;
         if (!userId || userId === skipUserId) return;
         try {
-          const view = await this.gameEngine.getGameState(gameId, userId);
-          s.emit('game:state_updated', { lastMove, ...view });
+          s.emit('game:state_updated', { lastMove, ...this.gameEngine.buildClientView(state, userId) });
         } catch {
           // Socket disconnected between move and broadcast — reconnect will sync
         }
@@ -242,8 +239,8 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
   async handleGameJoin(@ConnectedSocket() socket: Socket, @MessageBody() data: { gameId: string }) {
     const userId = socket.data.userId;
     socket.join(`game:${data.gameId}`);
-    await this.redis.set(`user:${userId}:activeGame`, data.gameId, 86400);
     await this.reconnection.setActiveGame(userId, data.gameId);
+    await this.reconnection.markReconnected(userId, data.gameId);
     // Mark player back — resets consecutiveMissedTurns and isConnected so AI stops.
     await this.gameEngine.markPlayerReconnected(data.gameId, userId);
 
@@ -287,9 +284,17 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
         currentTurnIndex: view.currentTurnIndex,
       });
 
-      if (view.moveCount > 0) {
-        // Mid-game cold relaunch: snap client to current state, don't replay deal animation.
+      // Deal ONCE per player, ever. claimInitialDeal returns true only on this player's
+      // first join and records them, so every later join — a reconnect, a cold relaunch,
+      // a second socket — resumes from the server's board instead of re-running the toss
+      // and re-dealing. `moveCount > 0` alone was not enough: a player who dropped before
+      // the first move had the whole deal replayed at them.
+      const isFirstDeal = await this.gameEngine.claimInitialDeal(data.gameId, userId);
+
+      if (!isFirstDeal || view.moveCount > 0) {
+        // Resuming: snap the client to the current state, no deal animation.
         socket.emit('game:state_sync', view);
+        this.emitPresence(data.gameId, userId, true);
       } else {
         // Fresh game start: animate toss rounds then deal.
         // Emit each toss round individually — client ignores isTie:true and waits
@@ -318,11 +323,15 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
   async handleGameReconnect(@ConnectedSocket() socket: Socket, @MessageBody() data: { gameId: string }) {
     const userId = socket.data.userId;
     socket.join(`game:${data.gameId}`);
-    await this.redis.set(`user:${userId}:activeGame`, data.gameId, 86400);
     await this.reconnection.setActiveGame(userId, data.gameId);
+    await this.reconnection.markReconnected(userId, data.gameId);
 
     await this.gameEngine.markPlayerReconnected(data.gameId, userId);
 
+    // A reconnect NEVER restarts the match or re-deals: the server's Redis state is the
+    // match, and the client is simply handed a snapshot of it — board, hand, melds,
+    // scores, whose turn it is, and each player's away-from-phone counters — then carries
+    // on from exactly where the server got to while they were gone.
     const state = await this.gameEngine.getGameState(data.gameId, userId);
 
     // Reconnect into an already-ended game (#9 / #4): deliver an authoritative game:end
@@ -342,12 +351,8 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
 
     socket.emit('game:state_sync', state);
 
-    // Notify all players that this player is back (symmetric with player:connection false)
-    this.server.to(`game:${data.gameId}`).emit('player:connection', {
-      gameId:    data.gameId,
-      playerId:  userId,
-      connected: true,
-    });
+    // Notify everyone at the table that this player is back.
+    this.emitPresence(data.gameId, userId, true);
   }
 
   // Shared error handler for all game:move:* handlers. If the game already ended

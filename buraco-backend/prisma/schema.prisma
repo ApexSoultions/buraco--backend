@@ -137,6 +137,22 @@ enum GameStatus {
   VOIDED
 }
 
+/**
+ * Who owns the authoritative match state.
+ *
+ * SERVER — this backend hosts the match: it deals, validates every move, runs turns/timers
+ * and the auto-play AI from a cron, and keeps the state in Redis. The match continues even
+ * when no player is connected. Only SERVER games are picked up by the cron.
+ *
+ * FUSION — legacy player-hosted (Photon Fusion) matches, whose outcome arrived via
+ * POST /v1/game/:gameId/report-result. Never processed by the cron; kept only so historical
+ * rows and their reports stay readable.
+ */
+enum GameHost {
+  SERVER
+  FUSION
+}
+
 enum MoveType {
   DRAW_STOCK
   DRAW_DISCARD
@@ -537,8 +553,12 @@ model GameSession {
   mode       GameMode
   variant    GameVariant
   status     GameStatus  @default(WAITING)
-  winnerIds  String[]
+  /// SERVER for every match this backend hosts. Only SERVER games are driven by the
+  /// turn-timeout cron; FUSION rows are historical and must never be re-processed.
+  hostedBy   GameHost    @default(SERVER)
+  /// null on a draw (both players away from their phones); otherwise the winning team id.
   winnerTeam Int?
+  winnerIds  String[]
   voidReason String?
   voidedBy   String?
   startedAt  DateTime?
@@ -552,6 +572,7 @@ model GameSession {
   resultReport MatchResultReport?
   room         Room?
 
+  @@index([hostedBy, status])
   @@map("game_sessions")
 }
 

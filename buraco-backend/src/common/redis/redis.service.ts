@@ -84,6 +84,25 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     return this.client.zscore(key, member);
   }
 
+  // Set ops (active-game index — see GameEngineService.activeGamesKey)
+  sadd(key: string, ...members: string[]) {
+    if (members.length === 0) return Promise.resolve(0);
+    return this.client.sadd(key, ...members);
+  }
+
+  srem(key: string, ...members: string[]) {
+    if (members.length === 0) return Promise.resolve(0);
+    return this.client.srem(key, ...members);
+  }
+
+  smembers(key: string): Promise<string[]> {
+    return this.client.smembers(key);
+  }
+
+  scard(key: string) {
+    return this.client.scard(key);
+  }
+
   // Hash ops (game state)
   hset(key: string, field: string, value: string) {
     return this.client.hset(key, field, value);

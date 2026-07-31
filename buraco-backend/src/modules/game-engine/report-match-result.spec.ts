@@ -70,7 +70,14 @@ function buildService(overrides: { existingReport?: boolean; gameStatus?: GameSt
   const redis: any = {
     getJson: jest.fn().mockResolvedValue(null),
     setJson: jest.fn().mockResolvedValue(undefined),
+    set: jest.fn().mockResolvedValue('OK'),
     del: jest.fn().mockResolvedValue(undefined),
+    // setNx returns 'OK' (lock acquired) by default so settlement proceeds; a test that
+    // wants the "already settled" branch overrides it with null.
+    setNx: jest.fn().mockResolvedValue('OK'),
+    sadd: jest.fn().mockResolvedValue(1),
+    srem: jest.fn().mockResolvedValue(1),
+    smembers: jest.fn().mockResolvedValue([]),
   };
   const economy: any = { distributeMatchReward: jest.fn().mockResolvedValue(undefined) };
   const stats: any = { updateAfterMatch: jest.fn().mockResolvedValue(undefined) };

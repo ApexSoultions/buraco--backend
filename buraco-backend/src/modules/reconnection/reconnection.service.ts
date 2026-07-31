@@ -1,8 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { RedisService } from '../../common/redis/redis.service';
 
-const DISCONNECT_TTL = 60;        // 60 seconds reconnect window
-const ACTIVE_GAME_TTL = 86400;    // 24 hours
+// How long a "this user dropped" marker survives. Purely informational — a disconnect no
+// longer ends or pauses anything. The backend hosts the match, so play continues via the
+// auto-play cron and the match ends only when a player reaches 12 auto-played turns.
+const DISCONNECT_TTL = 60;
+const ACTIVE_GAME_TTL = 86400;   // 24 hours — matches the Redis game-state TTL
+const LAST_GAME_TTL = 604800;    // 7 days — long enough to show a missed result
 
 @Injectable()
 export class ReconnectionService {
@@ -38,8 +42,26 @@ export class ReconnectionService {
     await this.redis.set(`user:${userId}:activeGame`, gameId, ACTIVE_GAME_TTL);
   }
 
-  /** Remove the active game record for a user */
+  /**
+   * Remove the active game record for a user, leaving a `lastGame` breadcrumb behind.
+   *
+   * Without the breadcrumb a player whose match ended while they were away had nothing on
+   * the server pointing at it, so they could not be shown the result when they came back
+   * (see GameEngineService.getResumeTarget, which reads it).
+   */
   async clearActiveGame(userId: string): Promise<void> {
+    const gameId = await this.redis.get(`user:${userId}:activeGame`);
+    if (gameId) await this.setLastGame(userId, gameId);
     await this.redis.del(`user:${userId}:activeGame`);
+  }
+
+  /** Remember the last match this user played, so its result stays reachable for 7 days. */
+  async setLastGame(userId: string, gameId: string): Promise<void> {
+    await this.redis.set(`user:${userId}:lastGame`, gameId, LAST_GAME_TTL);
+  }
+
+  /** The last match this user played, if it is still within the retention window. */
+  async getLastGame(userId: string): Promise<string | null> {
+    return this.redis.get(`user:${userId}:lastGame`);
   }
 }

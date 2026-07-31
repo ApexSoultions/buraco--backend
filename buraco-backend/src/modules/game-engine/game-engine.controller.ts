@@ -13,6 +13,20 @@ import { ReportMatchResultDto } from './dto/report-match-result.dto';
 export class GameEngineController {
   constructor(private readonly gameEngineService: GameEngineService) {}
 
+  // Registered BEFORE ':gameId/state' so the literal path is not swallowed by the
+  // parameterised route.
+  @Get('active')
+  @ApiOperation({
+    summary: 'The match this player should resume, resolved server-side',
+    description:
+      'Returns the live match if one is running (isActive: true), otherwise the last match ' +
+      'they played so a player returning after the result was decided can still be shown the ' +
+      'final scoreboard via GET /:gameId/result. gameId is null when there is nothing to resume.',
+  })
+  getActive(@CurrentUser('id') userId: string) {
+    return this.gameEngineService.getResumeTarget(userId);
+  }
+
   @Get(':gameId/state')
   @ApiOperation({ summary: 'Get current game state (filtered to your view)' })
   getState(@Param('gameId') gameId: string, @CurrentUser('id') userId: string) {
@@ -27,8 +41,10 @@ export class GameEngineController {
 
   @Post(':gameId/report-result')
   @ApiOperation({
-    summary: 'Report the final result of a Photon Fusion match (acting host device)',
+    summary: 'Report the final result of a legacy Photon Fusion match (acting host device)',
     description:
+      'LEGACY / FUSION-ONLY. Returns 403 SERVER_HOSTED_MATCH for any game with hostedBy=SERVER: ' +
+      'this backend computes those outcomes itself, so a client cannot declare one. ' +
       'Idempotent per gameId — retries and a second report after host migration both return { ok: true } ' +
       'without overwriting the stored result.',
   })

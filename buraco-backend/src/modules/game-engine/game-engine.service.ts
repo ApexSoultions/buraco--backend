@@ -1,12 +1,19 @@
-import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { GameMode, GameStatus, GameVariant, MoveType, Prisma, RoomStatus } from '@prisma/client';
+import { GameHost, GameMode, GameStatus, GameVariant, MoveType, Prisma, RoomStatus } from '@prisma/client';
 
 const INACTIVE_FAST_AUTOPLAY_SECONDS = 5;
 // Forfeit a player after this many FULLY auto-played turns. Counted once per turn
 // (see handleTurnTimeout) and accumulated per-player across the whole match — a new
 // round/hand does NOT reset it; only a manual move by that player clears it.
 const FORFEIT_AFTER_AUTO_TURNS = 12;
+// A player counts as "away from their phone" once this many of their turns in a row have
+// been auto-played. Used ONLY to decide the outcome when someone hits the 12-turn forfeit:
+// if every opponent is also away the match is a DRAW rather than a win handed to a player
+// who is equally absent. Half the forfeit threshold, so a player who genuinely stopped
+// playing is recognised well before their own forfeit fires. A manual move zeroes
+// forfeitMissedTurns (see processMove), so anyone actually playing is never "away".
+const AWAY_AFTER_AUTO_TURNS = 6;
 // Space auto-play sub-moves (draw / each meld / discard) ~one animation apart so the
 // client animates them smoothly AND the socket heartbeat pong isn't buried behind a
 // burst of messages (which the client mis-reads as a ~1500ms ping spike). Paced — NOT
@@ -73,6 +80,13 @@ export interface TossResult {
 
 export interface GameState {
   gameId: string;
+  /**
+   * Who owns this match. Always 'SERVER' for anything this engine deals — the backend runs
+   * the turns, timers and AI for it. A state written before this field existed was also
+   * written by this engine, so a MISSING value is read as 'SERVER' everywhere (see
+   * isServerHosted); only an explicit 'FUSION' is excluded from the cron.
+   */
+  hostedBy?: GameHost;
   mode: GameMode;
   variant: GameVariant;
   /** Professional Direct = hand empties on-the-fly to close; Indirect = must discard last card. */
@@ -106,6 +120,13 @@ export interface GameState {
   toss: TossResult | null;
   setupComplete: boolean;
   tossComplete: boolean;
+  /**
+   * User ids that have already been sent the opening toss + deal for this match.
+   * A player in this list is RESUMING, so game:join replays the current board via
+   * game:state_sync instead of re-running the deal animation. Without it the only
+   * signal was `moveCount > 0`, so a reconnect during the very first turn re-dealt.
+   */
+  dealtTo?: string[];
   targetScore: number;
   matchScores: Record<number, number>;
   winnerTeam?: number;
@@ -151,12 +172,15 @@ export interface GameState {
 /** One player's authoritative round-score breakdown row — same shape as `GameState.lastRoundScores` elements. */
 type PlayerRoundScoreRow = NonNullable<GameState['lastRoundScores']>[number];
 
+/** WIN / LOSS, or DRAW when the match ended with every player away from their phone. */
+type MatchOutcome = 'WIN' | 'LOSS' | 'DRAW';
+
 /** Public `game:end` per-player row — `userId`-keyed (vs. `PlayerRoundScoreRow`'s internal `playerId`) to match the socket payload the client reads. */
 type GameEndPlayerRow = {
   userId: string;
   playerName: string;
   teamId: number;
-  result: 'WIN' | 'LOSS';
+  result: MatchOutcome;
   score: number;
   roundScore: number;
   boardScore: number;
@@ -169,7 +193,7 @@ type GameEndPlayerRow = {
 };
 
 @Injectable()
-export class GameEngineService {
+export class GameEngineService implements OnModuleInit {
   private readonly logger = new Logger(GameEngineService.name);
 
   constructor(
@@ -180,15 +204,78 @@ export class GameEngineService {
     private socketService: SocketService,
   ) {}
 
+  /**
+   * Rebuild the active-game index once at boot.
+   *
+   * The index (see activeGamesKey) is what the 5s cron iterates, so it must survive a
+   * deploy or crash: an in-flight match whose id is missing from it would silently stop
+   * being auto-played. This is the ONE place a full `keys()` scan is acceptable — it runs
+   * a single time at startup rather than every 5 seconds.
+   *
+   * States written before `hostedBy` existed were written by THIS engine, so a missing
+   * marker is read as SERVER — otherwise every match live at deploy time would be dropped.
+   */
+  async onModuleInit() {
+    try {
+      const keys = await this.redis.keys('game:*:state');
+      const live: string[] = [];
+      for (const key of keys) {
+        const state = await this.redis.getJson<GameState>(key);
+        if (!state || state.status !== GameStatus.IN_PROGRESS) continue;
+        if (!this.isServerHosted(state)) continue;
+        live.push(state.gameId);
+      }
+      if (live.length > 0) await this.redis.sadd(this.activeGamesKey(), ...live);
+      this.logger.log(`Active-game index rebuilt: ${live.length} server-hosted match(es) resumed`);
+    } catch (err) {
+      this.logger.error('Failed to rebuild the active-game index', err);
+    }
+  }
+
+  /** Redis SET of game ids the backend is actively hosting. Drives the turn-timeout cron. */
+  private activeGamesKey() {
+    return 'games:active:server';
+  }
+
+  /**
+   * True when this backend owns the match. A state with no `hostedBy` predates the field and
+   * was written by this engine, so it counts as SERVER; only an explicit FUSION is excluded.
+   */
+  private isServerHosted(state: GameState): boolean {
+    return (state.hostedBy ?? GameHost.SERVER) === GameHost.SERVER;
+  }
+
+  /**
+   * Drives every server-hosted match forward, whether or not anyone is connected. This is
+   * what makes the backend — not a player's phone — the match host: two players can close
+   * their apps and the turns, timers and AI keep running here until the match ends or
+   * somebody comes back.
+   *
+   * Iterates the active-game index rather than `keys('game:*:state')`: that was an O(N)
+   * blocking scan of the entire Redis keyspace every 5 seconds, and it could not tell a
+   * server-hosted match from a legacy Fusion one.
+   */
   @Cron(CronExpression.EVERY_5_SECONDS)
   async checkTurnTimeouts() {
     try {
-      const keys = await this.redis.keys('game:*:state');
+      const gameIds = await this.redis.smembers(this.activeGamesKey());
       await Promise.all(
-        keys.map(async (key) => {
-          const state = await this.redis.getJson<GameState>(key);
-          if (!state || state.status !== GameStatus.IN_PROGRESS) return;
+        gameIds.map(async (gameId) => {
+          const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
+
+          // Self-heal: drop ids whose state is gone or finished so the index cannot grow
+          // unbounded and the cron never works a match that is already over.
+          if (!state || state.status !== GameStatus.IN_PROGRESS) {
+            await this.redis.srem(this.activeGamesKey(), gameId);
+            return;
+          }
+          // Legacy player-hosted match — the backend must never move it.
+          if (!this.isServerHosted(state)) {
+            await this.redis.srem(this.activeGamesKey(), gameId);
+            return;
+          }
           if (state.turnPhase === 'ROUND_ENDED') return;
+
           const currentPlayerId = state.turnOrder[state.currentTurnIndex];
           const cadence = (state.consecutiveMissedTurns ?? {})[currentPlayerId] ?? 0;
           const effectiveTimeout = cadence >= 1 ? INACTIVE_FAST_AUTOPLAY_SECONDS : state.turnDuration;
@@ -235,6 +322,9 @@ export class GameEngineService {
         mode,
         variant,
         status: GameStatus.IN_PROGRESS,
+        // This backend is the authoritative host for every match it deals. Only SERVER
+        // rows are driven by the turn-timeout cron.
+        hostedBy: GameHost.SERVER,
         startedAt: new Date(),
         winnerIds: [],
         players: {
@@ -288,6 +378,7 @@ export class GameEngineService {
 
     const state: GameState = {
       gameId: game.id,
+      hostedBy: GameHost.SERVER,
       mode,
       variant,
       endMode: resolvedEndMode,
@@ -317,6 +408,7 @@ export class GameEngineService {
       toss: tossResult,
       setupComplete: true,
       tossComplete: true,
+      dealtTo: [],
       consecutiveMissedTurns: {},
       forfeitMissedTurns: {},
       // Round 1: all matchScores are 0 → 75-rule inactive for everyone
@@ -327,7 +419,25 @@ export class GameEngineService {
     };
 
     await this.redis.setJson(this.stateKey(game.id), state, 86400);
+    // Hand the match to the cron. From here the backend drives it — turns, timers and AI
+    // keep running even if every player closes their app.
+    await this.redis.sadd(this.activeGamesKey(), game.id);
     return state;
+  }
+
+  /**
+   * Records that `userId` has been sent the opening toss + deal, so a later game:join from
+   * the same player resumes via game:state_sync instead of dealing again.
+   * Returns true when this is the player's FIRST join (i.e. they should get the deal).
+   */
+  async claimInitialDeal(gameId: string, userId: string): Promise<boolean> {
+    const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
+    if (!state) return false;
+    const dealtTo = state.dealtTo ?? [];
+    if (dealtTo.includes(userId)) return false;
+    state.dealtTo = [...dealtTo, userId];
+    await this.redis.setJson(this.stateKey(gameId), state, 86400);
+    return true;
   }
 
   async getGameState(gameId: string, requestingUserId: string) {
@@ -390,6 +500,9 @@ export class GameEngineService {
         seatIndex:   i,
         handCount:   0,
         score:       p.finalScore ?? 0,
+        missedTurns: 0,
+        awayTurns:   0,
+        isAway:      false,
       })),
       myHand:               [] as Card[],
       myMelds:              [] as Meld[],
@@ -410,11 +523,17 @@ export class GameEngineService {
       winnerTeam,
       winnerTeamId:         winnerTeam != null ? String(winnerTeam) : null,
       lastRoundScores:      [] as NonNullable<GameState['lastRoundScores']>,
+      awayAfterTurns:       AWAY_AFTER_AUTO_TURNS,
+      forfeitAfterTurns:    FORFEIT_AFTER_AUTO_TURNS,
       turnTimeRemaining:    0,
     };
   }
 
-  private buildClientView(state: GameState, requestingUserId: string) {
+  /**
+   * Public so the gateway can fan a single Redis read out to every socket in a game room
+   * (see AppGateway.broadcastGameState) instead of re-reading the state once per player.
+   */
+  buildClientView(state: GameState, requestingUserId: string) {
     const currentPlayerId = state.turnOrder[state.currentTurnIndex] ?? '';
     const topDiscardCard  = state.discardPile.length > 0
       ? state.discardPile[state.discardPile.length - 1]
@@ -443,6 +562,14 @@ export class GameEngineService {
       seatIndex:   state.seatMap?.[p.userId] ?? 0,
       handCount:   (state.hands[p.userId] || []).length,
       score:       (state.matchScores ?? {})[p.teamId] ?? 0,
+      // ── Away-from-phone counters ────────────────────────────────────────────
+      // Live on the server (the AI plays these turns), so a reconnecting client can show
+      // "opponent has missed N turns / forfeits in M" without tracking any of it locally.
+      // missedTurns is the per-round cadence counter (reset by a reconnect); awayTurns is
+      // the whole-match forfeit tally, cleared ONLY by a manual move.
+      missedTurns: (state.consecutiveMissedTurns ?? {})[p.userId] ?? 0,
+      awayTurns:   (state.forfeitMissedTurns ?? {})[p.userId] ?? 0,
+      isAway:      this.isPlayerAway(state, p.userId),
     }));
 
     return {
@@ -481,6 +608,10 @@ export class GameEngineService {
       // /state fallback (rather than /result) read this field by name.
       winnerTeamId:         state.winnerTeam != null ? String(state.winnerTeam) : null,
       lastRoundScores:      state.lastRoundScores ?? [],
+      // Thresholds the counters above are measured against, so the client can render
+      // "3 / 12" without hardcoding server rules.
+      awayAfterTurns:       AWAY_AFTER_AUTO_TURNS,
+      forfeitAfterTurns:    FORFEIT_AFTER_AUTO_TURNS,
       turnTimeRemaining: (() => {
         const cadence = (state.consecutiveMissedTurns ?? {})[currentPlayerId] ?? 0;
         const effective = cadence >= 1 ? INACTIVE_FAST_AUTOPLAY_SECONDS : state.turnDuration;
@@ -1020,7 +1151,7 @@ export class GameEngineService {
     };
   }
 
-  // ── Shared round-score breakdown (finalizeGame, resignGame, forfeitPlayer) ────────
+  // ── Shared round-score breakdown (finalizeGame, resignGame, endMatchByAbsence) ─────
   // A resign/forfeit ends the game from a hidden-hand state exactly like a normal round
   // close does, so it must go through the SAME server-side computation — otherwise those
   // paths fall back to omitting roundScore/breakdown, and each client derives the
@@ -1093,13 +1224,18 @@ export class GameEngineService {
     });
   }
 
-  /** Converts internal (`playerId`-keyed) rows to the public `game:end` (`userId`-keyed) shape. */
-  private toGameEndPlayers(rows: PlayerRoundScoreRow[], winnerIds: string[]): GameEndPlayerRow[] {
+  /**
+   * Converts internal (`playerId`-keyed) rows to the public `game:end` (`userId`-keyed) shape.
+   * `isDraw` (both players away from their phones) marks EVERY row DRAW and ignores winnerIds.
+   */
+  private toGameEndPlayers(rows: PlayerRoundScoreRow[], winnerIds: string[], isDraw = false): GameEndPlayerRow[] {
     return rows.map(s => ({
       userId:          s.playerId,
       playerName:      s.playerName,
       teamId:          s.teamId,
-      result:          winnerIds.includes(s.playerId) ? 'WIN' as const : 'LOSS' as const,
+      result:          isDraw
+        ? 'DRAW' as const
+        : winnerIds.includes(s.playerId) ? 'WIN' as const : 'LOSS' as const,
       score:           s.matchScore,
       roundScore:      s.roundScore,
       boardScore:      s.boardScore,
@@ -1119,8 +1255,132 @@ export class GameEngineService {
    */
   buildGameEndPlayersFromState(view: { lastRoundScores?: PlayerRoundScoreRow[]; winnerTeam?: number | null }): GameEndPlayerRow[] {
     const rows = view.lastRoundScores ?? [];
+    // winnerTeam 0 is the draw marker persisted by a both-players-away ending; there is no
+    // winning side to match rows against, so every row must come back DRAW.
+    const isDraw = view.winnerTeam === 0;
     const winnerIds = rows.filter(r => r.teamId === view.winnerTeam).map(r => r.playerId);
-    return this.toGameEndPlayers(rows, winnerIds);
+    return this.toGameEndPlayers(rows, winnerIds, isDraw);
+  }
+
+  // ── Single settlement path ────────────────────────────────────────────────────────
+  //
+  // Every way a match can end — normal finish, resign, 12-turn forfeit, mutual-absence
+  // draw, or a legacy Fusion report — funnels through settleMatchOnce. Before this, each
+  // path repeated the same "write gameSession + matchRecord, then pay stats and coins"
+  // block behind nothing stronger than a read-then-write `status !== IN_PROGRESS` check,
+  // so two endings racing (a resign landing while the cron's forfeit was mid-flight)
+  // could pay both players twice. distributeMatchReward is a bare balance increment with
+  // no dedupe of its own, so this guard is the only thing preventing that.
+
+  /**
+   * Persists the match outcome and pays rewards EXACTLY ONCE for `gameId`.
+   *
+   * Guarded three ways, cheapest first:
+   *   1. `game:{id}:settled` SETNX — blocks concurrent endings in the same process/cluster.
+   *   2. an existing `matchRecord` row — survives a Redis flush or an expired lock.
+   *   3. a P2002 catch on the insert — the DB's own unique index is the final backstop, and
+   *      losing that race means rewards are skipped rather than paid twice.
+   *
+   * @returns true when THIS call settled the match; false when it was already settled.
+   */
+  private async settleMatchOnce(
+    gameId: string,
+    args: {
+      players:    Array<{ userId: string; teamId: number }>;
+      mode:       GameMode;
+      variant:    GameVariant;
+      /** 0 = draw: no winners, everyone scored as DRAW and paid the non-winner reward. */
+      winnerTeam: number;
+      winnerIds:  string[];
+      scores:     Record<number, number>;
+      duration:   number;
+      reason:     string;
+    },
+  ): Promise<boolean> {
+    const { players, winnerTeam, winnerIds, scores, duration, reason } = args;
+    const isDraw = winnerTeam === 0;
+
+    if (!(await this.redis.setNx(`game:${gameId}:settled`, '1', 86400))) {
+      this.logger.warn(`Settlement for ${gameId} (${reason}) skipped — another ending path holds the lock`);
+      return false;
+    }
+
+    if (await this.prisma.matchRecord.findUnique({ where: { gameId }, select: { id: true } })) {
+      this.logger.warn(`Settlement for ${gameId} (${reason}) skipped — matchRecord already exists`);
+      return false;
+    }
+
+    const resultFor = (userId: string): MatchOutcome =>
+      isDraw ? 'DRAW' : winnerIds.includes(userId) ? 'WIN' : 'LOSS';
+    // A draw has no winning side, so the winnerTeam columns stay null.
+    const winnerTeamColumn = isDraw ? null : winnerTeam;
+
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.gameSession.update({
+          where: { id: gameId },
+          data: {
+            status:  GameStatus.COMPLETED,
+            endedAt: new Date(),
+            winnerIds,
+            winnerTeam: winnerTeamColumn,
+            duration,
+            players: {
+              updateMany: players.map(p => ({
+                where: { userId: p.userId },
+                data: { finalScore: scores[p.teamId] ?? 0, result: resultFor(p.userId) },
+              })),
+            },
+          },
+        });
+
+        await tx.matchRecord.create({
+          data: {
+            gameId,
+            mode:    args.mode,
+            variant: args.variant,
+            winnerIds,
+            winnerTeam: winnerTeamColumn,
+            scores,
+            duration,
+            players: {
+              create: players.map(p => ({
+                userId: p.userId,
+                teamId: p.teamId,
+                score:  scores[p.teamId] ?? 0,
+                result: resultFor(p.userId),
+              })),
+            },
+          },
+        });
+      });
+    } catch (err) {
+      // P2002 on matchRecord.gameId — another ending won the race between our two checks
+      // above and the insert. Bail out BEFORE paying rather than paying a second time.
+      if ((err as { code?: string })?.code === 'P2002') {
+        this.logger.warn(`Settlement for ${gameId} (${reason}) lost the insert race — rewards not re-issued`);
+        return false;
+      }
+      throw err;
+    }
+
+    // On a draw nobody is credited a win; both sides take the non-winner payout, matching
+    // how reportMatchResult already treats a neutral (winnerTeam 0) ending.
+    await Promise.all(players.map(async (p) => {
+      const isWinner = !isDraw && winnerIds.includes(p.userId);
+      const reward   = calculateMatchReward(scores[p.teamId] ?? 0, isWinner);
+      await this.statsService.updateAfterMatch(p.userId, isWinner ? 'WIN' : 'LOSS', reward.points, reward.xp);
+      await this.economyService.distributeMatchReward(p.userId, gameId, reward.coins);
+    }));
+
+    // The match is over: stop the cron from ever looking at it again.
+    await this.redis.srem(this.activeGamesKey(), gameId);
+    await this.resetRoomAfterGame(gameId, players.map(p => p.userId));
+
+    this.logger.log(
+      `Match ${gameId} settled: reason=${reason} ${isDraw ? 'DRAW' : `winnerTeam=${winnerTeam}`}`,
+    );
+    return true;
   }
 
   async finalizeGame(gameId: string, state?: GameState, closerTeamId?: number, buracoOfTwos?: boolean) {
@@ -1129,7 +1389,7 @@ export class GameEngineService {
 
     // Terminal guard: never re-open a match that another ending path (forfeit / resign /
     // a prior finalize) already completed. Without this, a stale or concurrent finalize —
-    // e.g. an in-flight auto-play sub-move landing just after forfeitPlayer set COMPLETED —
+    // e.g. an in-flight auto-play sub-move landing just after a forfeit set COMPLETED —
     // would deal a fresh round on an already-ended game, resurrecting a finished match and
     // producing the "one device shows the scoreboard, the other starts a new round" desync
     // (#4). It also enforces "12 auto-turns ALWAYS ends the match, never just the round" (#13):
@@ -1142,7 +1402,7 @@ export class GameEngineService {
     }
 
     // Compute this round's scores + per-player breakdown from the shared helpers above —
-    // also used by resignGame/forfeitPlayer so every ending path sends identical numbers.
+    // also used by resignGame/endMatchByAbsence so every ending path sends identical numbers.
     const { roundScores, teamBreakdowns } = this.computeRoundBreakdown(state, closerTeamId, true);
 
     // Accumulate into match scores
@@ -1170,6 +1430,28 @@ export class GameEngineService {
       const winnerIds  = state.players.filter(p => p.teamId === winnerTeam).map(p => p.userId);
       const duration   = Math.floor((Date.now() - state.gameStartedAt) / 1000);
 
+      // Settle FIRST, and only publish this outcome if we won the race. Writing the
+      // terminal state before settling meant a path that lost (e.g. this finalize landing
+      // just after a resign settled) still overwrote Redis and broadcast a contradicting
+      // game:end — leaving the DB saying one team won and the live state saying another.
+      const settled = await this.settleMatchOnce(gameId, {
+        players:    state.players.map(p => ({ userId: p.userId, teamId: p.teamId })),
+        mode:       state.mode,
+        variant:    state.variant,
+        winnerTeam,
+        winnerIds,
+        scores:     state.matchScores,
+        duration,
+        reason:     buracoOfTwos ? 'buraco_of_twos' : 'target_score_reached',
+      });
+
+      if (!settled) {
+        // Another ending already published the result. Leave it alone and report the
+        // outcome it recorded, in the same shape the terminal guard above returns.
+        const current = await this.redis.getJson<GameState>(this.stateKey(gameId));
+        return { alreadyEnded: true as const, winnerTeam: current?.winnerTeam ?? 0 };
+      }
+
       // Keep terminal state in Redis so GET /state returns COMPLETED status
       state.status     = GameStatus.COMPLETED;
       state.winnerTeam = winnerTeam;
@@ -1177,54 +1459,6 @@ export class GameEngineService {
       // authoritative round score/breakdown (the DB matchRecord only stores cumulative score).
       state.lastRoundScores = playerRoundRows;
       await this.redis.setJson(this.stateKey(gameId), state, 7200);
-
-      await this.prisma.$transaction(async (tx) => {
-        await tx.gameSession.update({
-          where: { id: gameId },
-          data: {
-            status: GameStatus.COMPLETED,
-            endedAt: new Date(),
-            winnerIds,
-            winnerTeam,
-            duration,
-            players: {
-              updateMany: state.players.map(p => ({
-                where: { userId: p.userId },
-                data: { finalScore: state.matchScores[p.teamId], result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS' },
-              })),
-            },
-          },
-        });
-
-        await tx.matchRecord.create({
-          data: {
-            gameId,
-            mode:      state.mode,
-            variant:   state.variant,
-            winnerIds,
-            winnerTeam,
-            scores:    state.matchScores,
-            duration,
-            players: {
-              create: state.players.map(p => ({
-                userId: p.userId,
-                teamId: p.teamId,
-                score:  state.matchScores[p.teamId],
-                result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS',
-              })),
-            },
-          },
-        });
-      });
-
-      await Promise.all(state.players.map(async (p) => {
-        const isWinner = winnerIds.includes(p.userId);
-        const reward   = calculateMatchReward(state.matchScores[p.teamId], isWinner);
-        await this.statsService.updateAfterMatch(p.userId, isWinner ? 'WIN' : 'LOSS', reward.points, reward.xp);
-        await this.economyService.distributeMatchReward(p.userId, gameId, reward.coins);
-      }));
-
-      await this.resetRoomAfterGame(gameId, state.players.map(p => p.userId));
 
       const endPayload = {
         gameId,
@@ -1320,72 +1554,10 @@ export class GameEngineService {
     return { roundTransition: true as const, round: state.round, matchScores: state.matchScores };
   }
 
-  async abandonGame(
-    gameId: string,
-    abandoningUserId: string,
-  ): Promise<{ winnerTeam: number; winnerIds: string[]; scores: Record<number, number>; duration: number } | null> {
-    const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
-    if (!state || state.status !== GameStatus.IN_PROGRESS) return null;
-    if (state.variant !== GameVariant.ONE_VS_ONE) return null;
-
-    const abandoner = state.players.find(p => p.userId === abandoningUserId);
-    if (!abandoner) return null;
-
-    const winnerTeam = abandoner.teamId === 1 ? 2 : 1;
-    const winnerIds  = state.players.filter(p => p.teamId === winnerTeam).map(p => p.userId);
-    const duration   = Math.floor((Date.now() - state.gameStartedAt) / 1000);
-    const scores: Record<number, number> = { 1: 0, 2: 0 };
-
-    await this.prisma.$transaction(async (tx) => {
-      await tx.gameSession.update({
-        where: { id: gameId },
-        data: {
-          status: GameStatus.COMPLETED,
-          endedAt: new Date(),
-          winnerIds,
-          winnerTeam,
-          duration,
-          players: {
-            updateMany: state.players.map(p => ({
-              where: { userId: p.userId },
-              data: { result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS' },
-            })),
-          },
-        },
-      });
-      await tx.matchRecord.create({
-        data: {
-          gameId,
-          mode:    state.mode,
-          variant: state.variant,
-          winnerIds,
-          winnerTeam,
-          scores,
-          duration,
-          players: {
-            create: state.players.map(p => ({
-              userId: p.userId,
-              teamId: p.teamId,
-              score:  0,
-              result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS',
-            })),
-          },
-        },
-      });
-    });
-
-    await Promise.all(
-      state.players.map(async (p) => {
-        const isWinner = winnerIds.includes(p.userId);
-        const reward   = calculateMatchReward(0, isWinner);
-        await this.statsService.updateAfterMatch(p.userId, isWinner ? 'WIN' : 'LOSS', reward.points, reward.xp);
-        await this.economyService.distributeMatchReward(p.userId, gameId, reward.coins);
-      }),
-    );
-
-    await this.redis.del(this.stateKey(gameId));
-    return { winnerTeam, winnerIds, scores, duration };
-  }
+  // `abandonGame` used to live here. It was dead code (nothing called it) and it was the
+  // only ending path that DELETED the Redis state instead of marking it COMPLETED, which
+  // left a returning player with no state to resync against. A disconnect is now handled
+  // by the auto-play cron + the 12-turn forfeit; a deliberate exit goes through resignGame.
 
   async resignGame(
     gameId: string,
@@ -1416,7 +1588,21 @@ export class GameEngineService {
     const { roundScores, teamBreakdowns } = this.computeRoundBreakdown(state, undefined, false);
     const playerRoundRows = this.buildPlayerRoundScoreRows(state, roundScores, teamBreakdowns, scores);
 
-    // Mark the state COMPLETED (matching forfeitPlayer/finalizeGame) instead of deleting
+    // Settle before publishing, so a resign that loses the race to a concurrent forfeit
+    // does not overwrite the outcome that was actually recorded (see finalizeGame).
+    const settled = await this.settleMatchOnce(gameId, {
+      players:    state.players.map(p => ({ userId: p.userId, teamId: p.teamId })),
+      mode:       state.mode,
+      variant:    state.variant,
+      winnerTeam,
+      winnerIds,
+      scores,
+      duration,
+      reason:     'resigned',
+    });
+    if (!settled) return null;
+
+    // Mark the state COMPLETED (matching endMatchByAbsence/finalizeGame) instead of deleting
     // it outright, so a straggling move from the other player gets a clean
     // GAME_NOT_IN_PROGRESS error instead of a raw "Game not found" 404.
     state.status     = GameStatus.COMPLETED;
@@ -1426,54 +1612,6 @@ export class GameEngineService {
     state.lastRoundScores = playerRoundRows;
     await this.redis.setJson(this.stateKey(gameId), state, 7200);
 
-    await this.prisma.$transaction(async (tx) => {
-      await tx.gameSession.update({
-        where: { id: gameId },
-        data: {
-          status: GameStatus.COMPLETED,
-          endedAt: new Date(),
-          winnerIds,
-          winnerTeam,
-          duration,
-          players: {
-            updateMany: state.players.map(p => ({
-              where: { userId: p.userId },
-              data: { finalScore: scores[p.teamId] ?? 0, result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS' },
-            })),
-          },
-        },
-      });
-      await tx.matchRecord.create({
-        data: {
-          gameId,
-          mode:    state.mode,
-          variant: state.variant,
-          winnerIds,
-          winnerTeam,
-          scores,
-          duration,
-          players: {
-            create: state.players.map(p => ({
-              userId: p.userId,
-              teamId: p.teamId,
-              score:  scores[p.teamId] ?? 0,
-              result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS',
-            })),
-          },
-        },
-      });
-    });
-
-    await Promise.all(
-      state.players.map(async (p) => {
-        const isWinner = winnerIds.includes(p.userId);
-        const reward   = calculateMatchReward(scores[p.teamId] ?? 0, isWinner);
-        await this.statsService.updateAfterMatch(p.userId, isWinner ? 'WIN' : 'LOSS', reward.points, reward.xp);
-        await this.economyService.distributeMatchReward(p.userId, gameId, reward.coins);
-      }),
-    );
-
-    await this.resetRoomAfterGame(gameId, state.players.map(p => p.userId));
     return { winnerTeam, winnerIds, scores, duration, players: this.toGameEndPlayers(playerRoundRows, winnerIds) };
   }
 
@@ -1514,7 +1652,11 @@ export class GameEngineService {
   }
 
   /**
-   * Persist the final result of a Fusion match as reported by the acting host device.
+   * Persist the final result of a legacy FUSION (player-hosted) match as reported by the
+   * acting host device.
+   *
+   * Rejected outright for SERVER-hosted matches: this backend computes those outcomes
+   * itself, so accepting a client's word for one would let a device declare its own win.
    *
    * Idempotent by `gameId`: the first report wins and every later one — a client retry,
    * or the *other* device reporting after a host migration — is acknowledged with the
@@ -1527,12 +1669,17 @@ export class GameEngineService {
     const game = await this.prisma.gameSession.findUnique({
       where: { id: gameId },
       select: {
-        id: true, mode: true, variant: true, status: true, startedAt: true, createdAt: true,
+        id: true, mode: true, variant: true, status: true, hostedBy: true,
+        startedAt: true, createdAt: true,
         players: { select: { userId: true, teamId: true } },
         matchRecord: { select: { id: true } },
       },
     });
     if (!game) throw new NotFoundException('GAME_NOT_FOUND');
+
+    if (game.hostedBy === GameHost.SERVER) {
+      throw new ForbiddenException('SERVER_HOSTED_MATCH');
+    }
 
     // Host migration means EITHER participant can end up as the reporter, so
     // participation is the only check — there is no designated host user to match.
@@ -1584,9 +1731,15 @@ export class GameEngineService {
     // socket flow) has had its economy and stats applied once already. Store the report
     // — it is the only place the per-player breakdown lives — but leave the earlier
     // settlement alone rather than paying out twice.
+    //
+    // The settled marker is the same key settleMatchOnce takes, so this legacy path and
+    // the server-hosted ending paths can never both pay out for one gameId. (A SERVER
+    // match is rejected above, so in practice they cannot meet — this is belt-and-braces
+    // for a row whose hostedBy was changed by hand.)
     const alreadySettled =
       !!game.matchRecord ||
-      (game.status !== GameStatus.IN_PROGRESS && game.status !== GameStatus.WAITING);
+      (game.status !== GameStatus.IN_PROGRESS && game.status !== GameStatus.WAITING) ||
+      !(await this.redis.setNx(`game:${gameId}:settled`, '1', 86400));
 
     if (alreadySettled) {
       this.logger.warn(
@@ -1671,6 +1824,10 @@ export class GameEngineService {
     dto: ReportMatchResultDto,
     teamByUser: Map<string, number>,
   ): Promise<void> {
+    // Belt-and-braces: a Fusion match should never be in the active-game index, but if one
+    // ever got there it must stop being auto-played the moment its result lands.
+    await this.redis.srem(this.activeGamesKey(), gameId);
+
     const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
     if (!state) return;
 
@@ -1765,6 +1922,38 @@ export class GameEngineService {
     };
   }
 
+  /**
+   * What this user should be put back into on launch, resolved server-side rather than from
+   * whatever gameId the client happens to have cached locally.
+   *
+   * `isActive: true`  → a live server-hosted match; the client should join and resync.
+   * `isActive: false` → the match they last played has finished; the client should fetch
+   *                     GET /:gameId/result and show the scoreboard they missed.
+   */
+  async getResumeTarget(userId: string): Promise<{
+    gameId: string | null;
+    isActive: boolean;
+    status: GameStatus | null;
+    hostedBy: GameHost | null;
+  }> {
+    const activeGameId = await this.redis.get(`user:${userId}:activeGame`);
+    const gameId = activeGameId ?? (await this.redis.get(`user:${userId}:lastGame`));
+    if (!gameId) return { gameId: null, isActive: false, status: null, hostedBy: null };
+
+    const game = await this.prisma.gameSession.findUnique({
+      where: { id: gameId },
+      select: { status: true, hostedBy: true },
+    });
+    if (!game) return { gameId: null, isActive: false, status: null, hostedBy: null };
+
+    return {
+      gameId,
+      isActive: game.status === GameStatus.IN_PROGRESS,
+      status:   game.status,
+      hostedBy: game.hostedBy,
+    };
+  }
+
   // ── Disconnect / reconnect state tracking ─────────────────────────────────
 
   async markPlayerDisconnected(gameId: string, userId: string): Promise<void> {
@@ -1802,46 +1991,77 @@ export class GameEngineService {
   }
 
   /**
+   * True when a player is "away from their phone": their socket is gone, OR they are still
+   * connected but the last AWAY_AFTER_AUTO_TURNS of their turns were all played by the AI.
+   *
+   * `forfeitMissedTurns` is zeroed by any manual move (processMove), so a player who is
+   * actually playing always reads as present no matter how long the match has run.
+   */
+  private isPlayerAway(state: GameState, userId: string): boolean {
+    const player = state.players.find(p => p.userId === userId);
+    if (player && player.isConnected === false) return true;
+    return (state.forfeitMissedTurns?.[userId] ?? 0) >= AWAY_AFTER_AUTO_TURNS;
+  }
+
+  /**
    * After each auto-played turn, check whether the player has reached 12 consecutive
-   * auto-plays (IDLE or DISCONNECTED) and forfeit them if so.
-   * Returns true if a forfeit was triggered (caller should return immediately).
+   * auto-plays (IDLE or DISCONNECTED) and end the match if so.
+   *
+   * The outcome depends on whether anyone is still actually there:
+   *   - at least one opponent present → that team WINS by forfeit;
+   *   - every opponent also away      → DRAW, because handing the win to a player who is
+   *     equally absent is not a result either side earned. This is the "both players closed
+   *     their phones" case; with alternating turns one of them always crosses 12 first, so
+   *     without this check the second player would win purely on turn order.
+   *
+   * Returns true if the match ended (caller should return immediately).
    */
   private async checkAndForfeit(gameId: string, playerId: string, state: GameState): Promise<boolean> {
     const missed = state.forfeitMissedTurns?.[playerId] ?? state.consecutiveMissedTurns?.[playerId] ?? 0;
     if (missed < FORFEIT_AFTER_AUTO_TURNS) return false;
-    const isDisconnected = !(state.players.find(p => p.userId === playerId)?.isConnected ?? true);
-    await this.forfeitPlayer(
-      gameId, playerId, state,
-      isDisconnected ? 'player_abandoned' : 'inactive_forfeit',
+
+    const forfeiter = state.players.find(p => p.userId === playerId);
+    if (!forfeiter) return false;
+
+    const opponents  = state.players.filter(p => p.teamId !== forfeiter.teamId);
+    const allAway    = opponents.length > 0 && opponents.every(p => this.isPlayerAway(state, p.userId));
+    const isDisconnected = !(forfeiter.isConnected ?? true);
+
+    await this.endMatchByAbsence(
+      gameId,
+      state,
+      // winnerTeam 0 = draw. Otherwise the opposing team takes the win.
+      allAway ? 0 : (forfeiter.teamId === 1 ? 2 : 1),
+      allAway ? 'both_players_away'
+              : isDisconnected ? 'player_abandoned' : 'inactive_forfeit',
     );
     return true;
   }
 
   /**
-   * Forfeit the given player after 12 consecutive auto-played turns.
-   * Works for both IDLE (connected but inactive) and DISCONNECTED players.
-   * Uses a Redis lock to prevent double-firing from concurrent cron ticks.
+   * Ends a match that ran out of participants — one player forfeiting after 12 auto-played
+   * turns, or every player being away (a draw). Uses a Redis lock so concurrent cron ticks
+   * cannot both fire, and routes the payout through settleMatchOnce so rewards are issued
+   * exactly once even if another ending path is racing this one.
    */
-  private async forfeitPlayer(
+  private async endMatchByAbsence(
     gameId: string,
-    forfeitingUserId: string,
     state: GameState,
-    reason: 'inactive_forfeit' | 'player_abandoned',
+    /** Winning team id, or 0 for a draw (every player away from their phone). */
+    winnerTeam: number,
+    reason: 'inactive_forfeit' | 'player_abandoned' | 'both_players_away',
   ): Promise<void> {
     if (state.status !== GameStatus.IN_PROGRESS) return;
 
-    // Atomic lock: only one concurrent cron tick may execute the forfeit
+    // Atomic lock: only one concurrent cron tick may execute the ending
     const lockKey = `game:${gameId}:ending`;
     const locked  = await this.redis.setNx(lockKey, '1', 30);
     if (!locked) return;
 
-    const forfeiter = state.players.find(p => p.userId === forfeitingUserId);
-    if (!forfeiter) { await this.redis.del(lockKey); return; }
-
-    const winnerTeam = forfeiter.teamId === 1 ? 2 : 1;
-    const winnerIds  = state.players.filter(p => p.teamId === winnerTeam).map(p => p.userId);
-    const duration   = Math.floor((Date.now() - state.gameStartedAt) / 1000);
-    const scores     = state.matchScores ?? { 1: 0, 2: 0 };
+    const isDraw    = winnerTeam === 0;
+    const winnerIds = isDraw ? [] : state.players.filter(p => p.teamId === winnerTeam).map(p => p.userId);
+    const duration  = Math.floor((Date.now() - state.gameStartedAt) / 1000);
+    const scores    = state.matchScores ?? { 1: 0, 2: 0 };
 
     // Authoritative per-player breakdown of the round in progress at forfeit time — same
     // reasoning as resignGame: no closer, no pot penalty, computed once server-side so
@@ -1849,63 +2069,27 @@ export class GameEngineService {
     const { roundScores, teamBreakdowns } = this.computeRoundBreakdown(state, undefined, false);
     const playerRoundRows = this.buildPlayerRoundScoreRows(state, roundScores, teamBreakdowns, scores);
 
+    // Settle before publishing, so an ending that loses the race to a concurrent resign
+    // does not overwrite the recorded outcome or broadcast a contradicting game:end.
+    const settled = await this.settleMatchOnce(gameId, {
+      players:    state.players.map(p => ({ userId: p.userId, teamId: p.teamId })),
+      mode:       state.mode,
+      variant:    state.variant,
+      winnerTeam,
+      winnerIds,
+      scores,
+      duration,
+      reason,
+    });
+    if (!settled) return;
+
     state.status     = GameStatus.COMPLETED;
+    // 0 is the persisted draw marker: buildClientView and buildGameEndPlayersFromState both
+    // read it, so a player who reconnects long after the match still learns it was a draw.
     state.winnerTeam = winnerTeam;
     // Persist so GET /result and a resync via getGameState can also return the breakdown.
     state.lastRoundScores = playerRoundRows;
     await this.redis.setJson(this.stateKey(gameId), state, 7200);
-
-    // Clear active game for all players directly (ReconnectionService not injected here)
-    await Promise.all(state.players.map(p => this.redis.del(`user:${p.userId}:activeGame`)));
-
-    await this.prisma.$transaction(async (tx) => {
-      await tx.gameSession.update({
-        where: { id: gameId },
-        data: {
-          status: GameStatus.COMPLETED,
-          endedAt: new Date(),
-          winnerIds,
-          winnerTeam,
-          duration,
-          players: {
-            updateMany: state.players.map(p => ({
-              where: { userId: p.userId },
-              data: {
-                finalScore: scores[p.teamId],
-                result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS',
-              },
-            })),
-          },
-        },
-      });
-
-      await tx.matchRecord.create({
-        data: {
-          gameId,
-          mode:      state.mode,
-          variant:   state.variant,
-          winnerIds,
-          winnerTeam,
-          scores,
-          duration,
-          players: {
-            create: state.players.map(p => ({
-              userId: p.userId,
-              teamId: p.teamId,
-              score:  scores[p.teamId],
-              result: winnerIds.includes(p.userId) ? 'WIN' : 'LOSS',
-            })),
-          },
-        },
-      });
-    });
-
-    await Promise.all(state.players.map(async (p) => {
-      const isWinner = winnerIds.includes(p.userId);
-      const reward   = calculateMatchReward(scores[p.teamId], isWinner);
-      await this.statsService.updateAfterMatch(p.userId, isWinner ? 'WIN' : 'LOSS', reward.points, reward.xp);
-      await this.economyService.distributeMatchReward(p.userId, gameId, reward.coins);
-    }));
 
     this.socketService.emitToRoom(`game:${gameId}`, 'game:end', {
       gameId,
@@ -1914,10 +2098,9 @@ export class GameEngineService {
       scores,
       duration,
       reason,
-      players: this.toGameEndPlayers(playerRoundRows, winnerIds),
+      isDraw,
+      players: this.toGameEndPlayers(playerRoundRows, winnerIds, isDraw),
     });
-
-    await this.resetRoomAfterGame(gameId, state.players.map(p => p.userId));
   }
 
   /** Delay between auto-play sub-moves so the client animates them smoothly and the
@@ -2474,8 +2657,14 @@ export class GameEngineService {
    * the lobby shows it as joinable again and players are fully released.
    */
   private async resetRoomAfterGame(gameId: string, playerIds: string[]): Promise<void> {
-    // Clear activeGame for all participants regardless of connection status.
-    await Promise.all(playerIds.map(id => this.redis.del(`user:${id}:activeGame`)));
+    // Clear activeGame for all participants regardless of connection status, but leave a
+    // `lastGame` breadcrumb behind. Clearing activeGame alone meant a player who was away
+    // when the match ended had nothing on the server pointing at the match they just
+    // played — GET /game/active reads this so they can still be shown the final result.
+    await Promise.all(playerIds.flatMap(id => [
+      this.redis.del(`user:${id}:activeGame`),
+      this.redis.set(`user:${id}:lastGame`, gameId, 604800), // 7 days
+    ]));
 
     // Update the room row back to EMPTY so it no longer lingers as IN_PROGRESS.
     try {
