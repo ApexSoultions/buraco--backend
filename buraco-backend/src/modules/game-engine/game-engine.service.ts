@@ -2,7 +2,6 @@ import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundEx
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { GameHost, GameMode, GameStatus, GameVariant, MoveType, Prisma, RoomStatus } from '@prisma/client';
 
-const INACTIVE_FAST_AUTOPLAY_SECONDS = 5;
 // Forfeit a player after this many FULLY auto-played turns. Counted once per turn
 // (see handleTurnTimeout) and accumulated per-player across the whole match — a new
 // round/hand does NOT reset it; only a manual move by that player clears it.
@@ -131,10 +130,12 @@ export interface GameState {
   matchScores: Record<number, number>;
   winnerTeam?: number;
   /**
-   * Cadence counter — consecutive auto-played turns per player.
-   * Resets to 0 on any manual action OR bare reconnect.
-   * When ≥ 1 at the start of a turn, the server uses INACTIVE_FAST_AUTOPLAY_SECONDS
-   * instead of the full turnDuration before auto-playing.
+   * Cadence counter — consecutive auto-played turns per player, shown to clients as
+   * `missedTurns`. Resets to 0 ONLY on a manual move by that player (see processMove) —
+   * NOT on a bare reconnect or a round transition, so a player who reconnects and then
+   * goes AFK again resumes counting from where they left off instead of starting over.
+   * Kept as a separate field from forfeitMissedTurns for the client's benefit (a
+   * "this-streak" number vs. a "whole match" tally); the two currently move in lockstep.
    */
   consecutiveMissedTurns?: Record<string, number>;
   /**
@@ -277,8 +278,10 @@ export class GameEngineService implements OnModuleInit {
           if (state.turnPhase === 'ROUND_ENDED') return;
 
           const currentPlayerId = state.turnOrder[state.currentTurnIndex];
-          const cadence = (state.consecutiveMissedTurns ?? {})[currentPlayerId] ?? 0;
-          const effectiveTimeout = cadence >= 1 ? INACTIVE_FAST_AUTOPLAY_SECONDS : state.turnDuration;
+          // Always the table's own configured turn length — an absent player no longer
+          // shortens it to a flat 5s (see markPlayerReconnected / buildClientView below,
+          // which use the same rule).
+          const effectiveTimeout = state.turnDuration;
           if (Date.now() - state.turnStartedAt > effectiveTimeout * 1000) {
             // Idempotency lock. This cron runs EVERY_5_SECONDS over ALL games via
             // Promise.all, and @Cron does not prevent a slow run from overlapping the
@@ -565,8 +568,10 @@ export class GameEngineService implements OnModuleInit {
       // ── Away-from-phone counters ────────────────────────────────────────────
       // Live on the server (the AI plays these turns), so a reconnecting client can show
       // "opponent has missed N turns / forfeits in M" without tracking any of it locally.
-      // missedTurns is the per-round cadence counter (reset by a reconnect); awayTurns is
-      // the whole-match forfeit tally, cleared ONLY by a manual move.
+      // Both are whole-match tallies now, cleared ONLY by a manual move (see processMove) —
+      // neither is reset by a bare reconnect or a new round, so a player who keeps
+      // disconnecting and reconnecting without ever actually playing keeps climbing toward
+      // the 12-turn forfeit instead of getting a free reset each time they pop back in.
       missedTurns: (state.consecutiveMissedTurns ?? {})[p.userId] ?? 0,
       awayTurns:   (state.forfeitMissedTurns ?? {})[p.userId] ?? 0,
       isAway:      this.isPlayerAway(state, p.userId),
@@ -612,11 +617,15 @@ export class GameEngineService implements OnModuleInit {
       // "3 / 12" without hardcoding server rules.
       awayAfterTurns:       AWAY_AFTER_AUTO_TURNS,
       forfeitAfterTurns:    FORFEIT_AFTER_AUTO_TURNS,
-      turnTimeRemaining: (() => {
-        const cadence = (state.consecutiveMissedTurns ?? {})[currentPlayerId] ?? 0;
-        const effective = cadence >= 1 ? INACTIVE_FAST_AUTOPLAY_SECONDS : state.turnDuration;
-        return Math.max(0, effective - Math.floor((Date.now() - state.turnStartedAt) / 1000));
-      })(),
+      // Always measured against the table's own configured turn length — matches
+      // `turnDuration` above exactly now. Previously this counted down from a flat 5s once
+      // a player had missed a turn, while `turnDuration` kept reporting the raw table
+      // setting, so a client sizing its timer ring from `turnDuration` disagreed with the
+      // moment the server actually auto-played.
+      turnTimeRemaining: Math.max(
+        0,
+        state.turnDuration - Math.floor((Date.now() - state.turnStartedAt) / 1000),
+      ),
     };
   }
 
@@ -1508,26 +1517,14 @@ export class GameEngineService implements OnModuleInit {
     state.turnPhase   = 'MUST_DRAW';
     state.turnStartedAt = Date.now();
     state.toss        = null; // no toss animation for round ≥ 2
-    // Only the per-round cadence counter resets here. forfeitMissedTurns tracks a
-    // player's cumulative AI-auto-played turns across the WHOLE match (it resets
-    // solely on a manual move, see processMove) — wiping it on every round transition
-    // meant an AFK player's 12-move forfeit threshold could never be reached in a
-    // multi-round match, since a round almost always ends before 12 is hit within it.
-    //
-    // Reset cadence for CONNECTED players (they get a fresh full turn window next round),
-    // but PRESERVE it for players who are still disconnected. Otherwise a disconnected
-    // player's first turn of every new round falls back from the 5s fast-autoplay path to
-    // the full turnDuration (e.g. 30s), so reaching the 12-turn forfeit could take many
-    // minutes across a multi-round match — the "12 AI moves but the game won't end" report
-    // (#12). Keeping cadence for the disconnected keeps them on the 5s path so the forfeit
-    // is reached in bounded time. A reconnect zeroes this for that player (markPlayerReconnected).
-    const carriedCadence: Record<string, number> = {};
-    for (const p of state.players) {
-      if (p.isConnected === false) {
-        carriedCadence[p.userId] = (state.consecutiveMissedTurns ?? {})[p.userId] ?? 1;
-      }
-    }
-    state.consecutiveMissedTurns = carriedCadence;
+    // Neither miss counter is touched on a round transition. forfeitMissedTurns tracks a
+    // player's cumulative AI-auto-played turns across the WHOLE match (it resets solely on
+    // a manual move, see processMove) — wiping it on every round transition meant an AFK
+    // player's 12-move forfeit threshold could never be reached in a multi-round match,
+    // since a round almost always ends before 12 is hit within it. consecutiveMissedTurns
+    // now follows the exact same rule (see markPlayerReconnected and its own doc comment on
+    // GameState) so an AFK player's streak keeps climbing across round boundaries too,
+    // instead of quietly resetting every time a new hand is dealt.
 
     // Re-evaluate 75-rule for every player using the updated cumulative match scores
     state.seventyFiveRule = Object.fromEntries(state.players.map(p => {
@@ -1974,19 +1971,19 @@ export class GameEngineService implements OnModuleInit {
     // If the timer already expired while this player was away and it is still their
     // turn, give them a fresh full-duration window so the next cron tick does not
     // immediately auto-play on their behalf. Otherwise leave turnStartedAt untouched
-    // so the remaining time is resumed rather than reset. Must check using the cadence
-    // that was actually in effect while they were away, before it gets zeroed below.
+    // so the remaining time is resumed rather than reset.
     if (state.status === GameStatus.IN_PROGRESS && state.turnOrder[state.currentTurnIndex] === userId) {
-      const cadence = (state.consecutiveMissedTurns ?? {})[userId] ?? 0;
-      const effectiveTimeout = cadence >= 1 ? INACTIVE_FAST_AUTOPLAY_SECONDS : state.turnDuration;
+      const effectiveTimeout = state.turnDuration;
       const expired = Date.now() - state.turnStartedAt > effectiveTimeout * 1000;
       if (expired) {
         state.turnStartedAt = Date.now();
       }
     }
-    // Stop AI takeover the moment the player is back — reset their auto-play counter.
-    if (!state.consecutiveMissedTurns) state.consecutiveMissedTurns = {};
-    state.consecutiveMissedTurns[userId] = 0;
+    // Deliberately does NOT touch consecutiveMissedTurns/forfeitMissedTurns. A bare
+    // reconnect means the player is back on the socket, not that they made a move — it
+    // should not erase how many turns the AI has already played for them. If they go AFK
+    // again right after reconnecting, both counters resume from where they left off
+    // instead of restarting at 0 (only an actual move, see processMove, clears them).
     await this.redis.setJson(this.stateKey(gameId), state, 86400);
   }
 

@@ -380,3 +380,121 @@ describe('reconnect payload', () => {
     await expect(s2.claimInitialDeal(GAME_ID, P2)).resolves.toBe(true);
   });
 });
+
+// ── Reported bug: reconnecting used to zero the AI-turn counters ─────────────────────
+describe('reconnecting does not reset the AI-turn counters', () => {
+  it('leaves both miss counters untouched on a bare reconnect', async () => {
+    const state = gameState({
+      forfeitMissedTurns: { [P1]: 5, [P2]: 0 },
+      consecutiveMissedTurns: { [P1]: 5, [P2]: 0 },
+      players: [
+        { userId: P1, teamId: 1, isConnected: false },
+        { userId: P2, teamId: 2, isConnected: true },
+      ],
+      // Not P1's turn, so the "give a fresh window" branch doesn't fire either — this
+      // isolates the counter-reset behaviour on its own.
+      currentTurnIndex: 1,
+    });
+    const { service } = buildService({ state });
+
+    await service.markPlayerReconnected(GAME_ID, P1);
+
+    expect(state.players.find((p) => p.userId === P1)!.isConnected).toBe(true);
+    // Reconnecting flips presence but must NOT forgive the streak — only an actual move does.
+    expect(state.forfeitMissedTurns![P1]).toBe(5);
+    expect(state.consecutiveMissedTurns![P1]).toBe(5);
+  });
+
+  it('lets a player who reconnects and goes AFK again reach the 12-turn forfeit without restarting the count', async () => {
+    // P1 already missed 11 turns before disconnecting, on their own turn.
+    const state = gameState({
+      forfeitMissedTurns: { [P1]: 11, [P2]: 0 },
+      consecutiveMissedTurns: { [P1]: 11, [P2]: 0 },
+      players: [
+        { userId: P1, teamId: 1, isConnected: false },
+        { userId: P2, teamId: 2, isConnected: true },
+      ],
+      currentTurnIndex: 0,
+    });
+    const { service, socket } = buildService({ state });
+
+    await service.markPlayerReconnected(GAME_ID, P1);
+    expect(state.forfeitMissedTurns![P1]).toBe(11);      // unchanged by the reconnect itself
+    expect(state.consecutiveMissedTurns![P1]).toBe(11);
+
+    // ...then goes quiet again without ever making a manual move — the very next
+    // auto-played turn must be the 12th (forfeit), not the 1st.
+    await service.handleTurnTimeout(GAME_ID);
+
+    expect(state.forfeitMissedTurns![P1]).toBe(12);
+    expect(lastGameEnd(socket)).toMatchObject({ reason: 'inactive_forfeit', winnerTeam: 2 });
+  });
+
+  it('carries both counters across a round transition too, not just a reconnect', async () => {
+    // Regression for the flip side of the same bug: the round-transition code used to
+    // rebuild consecutiveMissedTurns from scratch for anyone still "connected", silently
+    // erasing their streak every time a new hand was dealt.
+    const state = gameState({
+      stockPile: [],
+      discardPile: [],
+      hands: { [P1]: [], [P2]: [] },
+      forfeitMissedTurns: { [P1]: 4, [P2]: 0 },
+      consecutiveMissedTurns: { [P1]: 4, [P2]: 0 },
+      players: [
+        { userId: P1, teamId: 1, isConnected: true }, // connected — the old bug only spared the disconnected
+        { userId: P2, teamId: 2, isConnected: true },
+      ],
+    });
+    const { service } = buildService({ state });
+
+    await service.handleTurnTimeout(GAME_ID); // 5th auto-play; empty hand/stock forces a round-ending path
+
+    expect(state.forfeitMissedTurns![P1]).toBe(5);
+    expect(state.consecutiveMissedTurns![P1]).toBe(5);
+  });
+});
+
+// ── Reported bug: the AFK timer used to drop to a flat 5s instead of the table's own
+// configured turn length ───────────────────────────────────────────────────────────────
+describe('turn timeout always waits the table\'s configured duration', () => {
+  it('does NOT auto-play an absent player before turnDuration has elapsed, even after a prior miss', async () => {
+    const state = gameState({
+      turnDuration: 30,
+      turnStartedAt: Date.now() - 10_000, // only 10s in — well under the 30s table setting
+      consecutiveMissedTurns: { [P1]: 1, [P2]: 0 }, // P1 already missed a turn once
+      forfeitMissedTurns: { [P1]: 1, [P2]: 0 },
+      players: [
+        { userId: P1, teamId: 1, isConnected: false },
+        { userId: P2, teamId: 2, isConnected: true },
+      ],
+    });
+    const { service, redis } = buildService({ state });
+    redis.smembers.mockResolvedValue([GAME_ID]);
+
+    await service.checkTurnTimeouts();
+
+    // The old 5s fast-autoplay path would have fired here (10s > 5s); the table's own 30s
+    // setting must not have elapsed yet, so nothing should be auto-played.
+    expect(redis.setNx).not.toHaveBeenCalledWith(`game:${GAME_ID}:autoplay`, '1', 15);
+    expect(state.consecutiveMissedTurns![P1]).toBe(1);
+  });
+
+  it('auto-plays once turnDuration has elapsed, matching the table setting exactly', async () => {
+    const state = gameState({
+      turnDuration: 30,
+      turnStartedAt: Date.now() - 31_000, // just past the table's 30s
+      consecutiveMissedTurns: { [P1]: 1, [P2]: 0 },
+      forfeitMissedTurns: { [P1]: 1, [P2]: 0 },
+      players: [
+        { userId: P1, teamId: 1, isConnected: false },
+        { userId: P2, teamId: 2, isConnected: true },
+      ],
+    });
+    const { service, redis } = buildService({ state });
+    redis.smembers.mockResolvedValue([GAME_ID]);
+
+    await service.checkTurnTimeouts();
+
+    expect(redis.setNx).toHaveBeenCalledWith(`game:${GAME_ID}:autoplay`, '1', 15);
+  });
+});

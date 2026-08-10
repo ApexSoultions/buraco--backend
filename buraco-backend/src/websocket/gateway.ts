@@ -241,7 +241,8 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     socket.join(`game:${data.gameId}`);
     await this.reconnection.setActiveGame(userId, data.gameId);
     await this.reconnection.markReconnected(userId, data.gameId);
-    // Mark player back — resets consecutiveMissedTurns and isConnected so AI stops.
+    // Mark player back — flips isConnected so the AI stops taking their NEXT turn. Does
+    // NOT reset their missed/away-turn counters; those only clear on an actual move.
     await this.gameEngine.markPlayerReconnected(data.gameId, userId);
 
     try {
