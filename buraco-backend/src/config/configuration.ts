@@ -61,5 +61,9 @@ export default () => ({
     newUserCoins: parseInt(process.env.NEW_USER_COINS ?? '1000', 10) || 1000,
     newUserDiamonds: parseInt(process.env.NEW_USER_DIAMONDS ?? '0', 10) || 0,
     newUserLives: parseInt(process.env.NEW_USER_LIVES ?? '5', 10) || 5,
+    // Kill switch for the temporary QA socket event `game:debug:force_round`.
+    // ON by default so the test build works on a freshly deployed server with no env
+    // change; set DEBUG_GAME_EVENTS=false to turn it off without a redeploy of code.
+    debugEventsEnabled: (process.env.DEBUG_GAME_EVENTS ?? 'true').toLowerCase() !== 'false',
   },
 });

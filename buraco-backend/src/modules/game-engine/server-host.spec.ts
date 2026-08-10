@@ -282,6 +282,121 @@ describe('settlement happens exactly once', () => {
   });
 });
 
+// ── #13: 12 auto-turns ends the MATCH, never just the round ───────────────────────────
+//
+// The dangerous case is the auto-played turn that would ALSO have ended the round: if the
+// round transition ran first it would emit game:new_round, deal a fresh hand and (before
+// forfeitMissedTurns was made match-wide) reset the tally, so the match carried on with a
+// player who had not touched their phone for 12 turns. Forfeit must be evaluated first and
+// the round transition must not happen at all.
+describe('12 auto-turns end the match immediately — no game:new_round', () => {
+  function card(id: string, rank: any = '5', suit: any = 'CLUBS') {
+    return { id, suit, rank, isWild: rank === 'JOKER' || rank === '2' } as any;
+  }
+
+  /**
+   * MUST_DRAW state whose auto-draw leaves the Classic stock at 2 cards — the condition
+   * that ends the round — so this single auto-turn is both the 12th miss AND a round end.
+   */
+  function roundEndingState(overrides: Partial<GameState> = {}) {
+    return gameState({
+      turnPhase: 'MUST_DRAW',
+      stockPile: [card('s1'), card('s2'), card('s3')],
+      discardPile: [], // keeps the AI on the stock-draw branch
+      hands: { [P1]: [card('h1'), card('h2')], [P2]: [card('h3')] },
+      targetScore: 3000,          // non-zero, so a finalize would transition rather than end
+      matchScores: { 1: 100, 2: 80 },
+      ...overrides,
+    });
+  }
+
+  /** Every `game:new_round` emitted (it goes out per-player, not to the room). */
+  function newRoundEmits(socket: any) {
+    return socket.emitPerPlayer.mock.calls.filter((c: any[]) => c[1] === 'game:new_round');
+  }
+
+  it('ends with game:end and NO new_round when the 12th auto-turn also ends the round', async () => {
+    const state = roundEndingState({
+      forfeitMissedTurns: { [P1]: 11, [P2]: 0 },
+      consecutiveMissedTurns: { [P1]: 11, [P2]: 0 },
+      players: [
+        { userId: P1, teamId: 1, isConnected: false },
+        { userId: P2, teamId: 2, isConnected: true },
+      ],
+    });
+    const { service, socket } = buildService({ state });
+
+    await forfeitViaTimeout(service);
+
+    const end = lastGameEnd(socket);
+    expect(end).toBeDefined();
+    expect(end.winnerTeam).toBe(2);
+    expect(end.reason).toBe('player_abandoned');
+    expect(newRoundEmits(socket)).toHaveLength(0);
+    expect(state.status).toBe(GameStatus.COMPLETED);
+    // The round transition never ran, so the tally is not wiped and the round did not advance.
+    expect(state.round).toBe(1);
+    expect(state.forfeitMissedTurns![P1]).toBe(12);
+  });
+
+  it('ends with game:end and NO new_round on an ordinary 12th auto-turn', async () => {
+    const state = gameState({
+      turnPhase: 'CAN_MELD_OR_DISCARD',
+      stockPile: [card('s1'), card('s2'), card('s3'), card('s4'), card('s5')],
+      discardPile: [card('d1', 'K', 'SPADES')],
+      hands: { [P1]: [card('h1', '9', 'HEARTS'), card('h2', '3', 'DIAMONDS')], [P2]: [card('h3')] },
+      targetScore: 3000,
+      forfeitMissedTurns: { [P1]: 11, [P2]: 0 },
+      consecutiveMissedTurns: { [P1]: 11, [P2]: 0 },
+    });
+    const { service, socket } = buildService({ state });
+
+    await forfeitViaTimeout(service);
+
+    expect(lastGameEnd(socket)).toBeDefined();
+    expect(newRoundEmits(socket)).toHaveLength(0);
+    expect(state.status).toBe(GameStatus.COMPLETED);
+  });
+
+  it('a straggling finalize after the forfeit cannot re-open the match into a new round', async () => {
+    // Belt-and-braces on the ordering above: an in-flight finalize landing after the
+    // forfeit has set COMPLETED must be refused by finalizeGame's terminal guard.
+    const state = roundEndingState({
+      forfeitMissedTurns: { [P1]: 11, [P2]: 0 },
+      consecutiveMissedTurns: { [P1]: 11, [P2]: 0 },
+    });
+    const { service, socket } = buildService({ state });
+
+    await forfeitViaTimeout(service);
+    const result: any = await service.finalizeGame(GAME_ID, state);
+
+    expect(result.alreadyEnded).toBe(true);
+    expect(newRoundEmits(socket)).toHaveLength(0);
+    expect(state.round).toBe(1);
+  });
+
+  it('still transitions rounds normally when the player is BELOW the threshold', async () => {
+    // The control: same round-ending auto-turn, but only 5 misses. The round must advance
+    // via game:new_round and the match must NOT end — the forfeit check has to be an
+    // early-exit, not a change to normal round handling.
+    const state = roundEndingState({
+      forfeitMissedTurns: { [P1]: 5, [P2]: 0 },
+      consecutiveMissedTurns: { [P1]: 5, [P2]: 0 },
+    });
+    const { service, socket } = buildService({ state });
+
+    await forfeitViaTimeout(service);
+
+    expect(newRoundEmits(socket)).toHaveLength(1);
+    expect(lastGameEnd(socket)).toBeUndefined();
+    expect(state.status).toBe(GameStatus.IN_PROGRESS);
+    expect(state.round).toBe(2);
+    // Both miss counters survive the new deal — neither resets on a round transition.
+    expect(state.forfeitMissedTurns![P1]).toBe(6);
+    expect(state.consecutiveMissedTurns![P1]).toBe(6);
+  });
+});
+
 describe('only SERVER-hosted games are driven by the cron', () => {
   it('auto-plays a SERVER game whose turn has expired', async () => {
     const { service, redis } = buildService();
@@ -431,9 +546,9 @@ describe('reconnecting does not reset the AI-turn counters', () => {
   });
 
   it('carries both counters across a round transition too, not just a reconnect', async () => {
-    // Regression for the flip side of the same bug: the round-transition code used to
-    // rebuild consecutiveMissedTurns from scratch for anyone still "connected", silently
-    // erasing their streak every time a new hand was dealt.
+    // Regression for the flip side of the same bug: dealNewRound used to rebuild
+    // consecutiveMissedTurns from scratch for anyone still "connected", silently erasing
+    // their streak every time a new hand was dealt.
     const state = gameState({
       stockPile: [],
       discardPile: [],

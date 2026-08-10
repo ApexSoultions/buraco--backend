@@ -235,6 +235,27 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     );
   }
 
+  /**
+   * Sends one move out to the whole table: the actor gets the view processMove already
+   * built, everyone else gets their own view derived from a single fresh Redis read.
+   *
+   * Every seat receives the IDENTICAL `lastMove` object — the actor's copy used to be
+   * assembled separately from the broadcast one, which is how a rollback could be described
+   * to the actor and not to the opponent. `seq` is the post-move `moveCount`: a client that
+   * has already applied this move can drop a duplicate/echoed payload instead of tearing
+   * down and rebuilding the board again.
+   */
+  private async publishMove(
+    socket: Socket,
+    gameId: string,
+    lastMove: Record<string, unknown>,
+    actorView: any,
+  ) {
+    const stamped = { ...lastMove, seq: actorView?.moveCount ?? null };
+    socket.emit('game:state_updated', { lastMove: stamped, ...actorView });
+    await this.broadcastGameState(gameId, stamped, socket.data.userId);
+  }
+
   @SubscribeMessage('game:join')
   async handleGameJoin(@ConnectedSocket() socket: Socket, @MessageBody() data: { gameId: string }) {
     const userId = socket.data.userId;
@@ -399,8 +420,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
         const lastMove: Record<string, unknown> = data.source === 'STOCK'
           ? { type: 'DRAW', playerId: userId, teamId: result.teamId, source: 'STOCK', cardIds: result.result?.card ? [result.result.card.id] : [] }
           : { type: 'PICKUP_DISCARD', playerId: userId, teamId: result.teamId, source: 'DISCARD', cardIds: result.result?.takenCardIds ?? [] };
-        socket.emit('game:state_updated', { lastMove, ...result.state });
-        await this.broadcastGameState(data.gameId, lastMove, userId);
+        await this.publishMove(socket, data.gameId, lastMove, result.state);
       }
     } catch (err) {
       await this.handleMoveError(socket, data.gameId, err);
@@ -418,10 +438,21 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
       } else if (result && 'roundTransition' in result) {
         // handled by finalizeGame
       } else {
-        const lastMove: Record<string, unknown> = { type: 'DISCARD', playerId: userId, teamId: result.teamId, cardId: data.cardId };
+        const lastMove: Record<string, unknown> = {
+          type: 'DISCARD',
+          playerId: userId,
+          teamId: result.teamId,
+          cardId: data.cardId,
+          // Named per the handoff spec; `cardId` kept for existing clients.
+          discardedCardId: data.cardId,
+          // A discard that also rolled back a short 75-rule attempt reports the returned
+          // cards and the requirement escalation inline, so the client animates the return
+          // and re-labels the seat from one payload instead of inferring either.
+          autoCancelled75: !!result.rollback,
+          ...(result.rollback ?? {}),
+        };
         if (result.result?.potAwarded) lastMove['potAwarded'] = result.result.potAwarded;
-        socket.emit('game:state_updated', { lastMove, ...result.state });
-        await this.broadcastGameState(data.gameId, lastMove, userId);
+        await this.publishMove(socket, data.gameId, lastMove, result.state);
       }
     } catch (err) {
       await this.handleMoveError(socket, data.gameId, err);
@@ -442,8 +473,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
         const r = result as any;
         const lastMove: Record<string, unknown> = { type: 'MELD', playerId: userId, teamId: r.teamId, meldId: r.result?.meld?.id, cardIds: data.cardIds };
         if (r.result?.potAwarded) lastMove['potAwarded'] = r.result.potAwarded;
-        socket.emit('game:state_updated', { lastMove, ...r.state });
-        await this.broadcastGameState(data.gameId, lastMove, userId);
+        await this.publishMove(socket, data.gameId, lastMove, r.state);
       }
     } catch (err) {
       await this.handleMoveError(socket, data.gameId, err);
@@ -464,8 +494,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
         const r = result as any;
         const lastMove: Record<string, unknown> = { type: 'ADD_TO_MELD', playerId: userId, teamId: r.teamId, meldId: data.meldId, cardIds: data.cardIds };
         if (r.result?.potAwarded) lastMove['potAwarded'] = r.result.potAwarded;
-        socket.emit('game:state_updated', { lastMove, ...r.state });
-        await this.broadcastGameState(data.gameId, lastMove, userId);
+        await this.publishMove(socket, data.gameId, lastMove, r.state);
       }
     } catch (err) {
       await this.handleMoveError(socket, data.gameId, err);
@@ -480,9 +509,32 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
       if (!('winnerTeam' in result) && !('roundTransition' in result)) {
         const r = result as any;
         const lastMove = { type: 'PICKUP_POT', playerId: userId, teamId: r.teamId };
-        socket.emit('game:state_updated', { lastMove, ...r.state });
-        await this.broadcastGameState(data.gameId, lastMove, userId);
+        await this.publishMove(socket, data.gameId, lastMove, r.state);
       }
+    } catch (err) {
+      await this.handleMoveError(socket, data.gameId, err);
+    }
+  }
+
+  @SubscribeMessage('game:move:cancel_melds')
+  async handleCancelMelds(@ConnectedSocket() socket: Socket, @MessageBody() data: { gameId: string }) {
+    const userId = socket.data.userId;
+    try {
+      const result = await this.gameEngine.cancelMelds(data.gameId, userId);
+      const r = result as any;
+      const lastMove: Record<string, unknown> = {
+        type: 'CANCEL_MELDS',
+        playerId: userId,
+        teamId: r.teamId,
+        // Legacy name for the same list — clients keyed on `cardIds` keep working.
+        cardIds: r.rollback.returnedCardIds,
+        // returnedCardIds + the requirement/turn-points before-and-after. Sent to EVERY
+        // viewer, not just the actor: the opponent's phone animates these exact cards from
+        // that seat's meld area back to its hand, which it could not do while the ids were
+        // actor-only and the melds were already gone from its state.
+        ...r.rollback,
+      };
+      await this.publishMove(socket, data.gameId, lastMove, r.state);
     } catch (err) {
       await this.handleMoveError(socket, data.gameId, err);
     }
@@ -505,6 +557,56 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
 
     const sockets = await this.server.in(`game:${gameId}`).fetchSockets();
     await Promise.all(sockets.map((s) => this.reconnection.clearActiveGame(s.data.userId)));
+  }
+
+  // ─── Debug / QA (temporary) ───────────────────────────────────────────────
+
+  /**
+   * `game:debug:force_round` — jump this match to a later round with the 75-rule armed.
+   *
+   * Body: `{ gameId }`. A bare gameId string is also accepted (Unity sends that shape on
+   * some events — see room:join). Optional overrides: `{ round, teamScore }`; teamScore
+   * below 1000 forces the scenario where the rule must stay OFF.
+   *
+   * Replies to the caller with `game:debug:force_round_ack`
+   * (`{ gameId, round, matchScores, seventyFiveRule, currentPlayerId }`) or
+   * `game:debug:error` on failure. Everyone at the table gets the normal `game:new_round`,
+   * so no new client handling is needed beyond firing this event.
+   *
+   * Turn it off on a server with `DEBUG_GAME_EVENTS=false`. Remove this handler and
+   * GameEngineService.forceRoundForTesting once the 75-rule is signed off.
+   */
+  @SubscribeMessage('game:debug:force_round')
+  async handleDebugForceRound(
+    @ConnectedSocket() socket: Socket,
+    @MessageBody() data: { gameId?: string; round?: number; teamScore?: number } | string,
+  ) {
+    if (!this.config.get<boolean>('game.debugEventsEnabled')) {
+      socket.emit('game:debug:error', { code: 'DEBUG_DISABLED', message: 'Debug events are disabled on this server' });
+      return;
+    }
+
+    const userId  = socket.data.userId;
+    const payload = typeof data === 'string' ? { gameId: data } : (data ?? {});
+    // Fall back to the caller's active game so the test button works even if the client
+    // has not threaded a gameId through to it.
+    const gameId  = payload.gameId ?? await this.redis.get(`user:${userId}:activeGame`);
+
+    if (!gameId) {
+      socket.emit('game:debug:error', { code: 'INVALID_PAYLOAD', message: 'gameId is required' });
+      return;
+    }
+
+    try {
+      const result = await this.gameEngine.forceRoundForTesting(gameId, userId, {
+        round: payload.round,
+        teamScore: payload.teamScore,
+      });
+      socket.emit('game:debug:force_round_ack', result);
+    } catch (err) {
+      this.logger.error(`game:debug:force_round failed for ${userId} in game ${gameId}`, err);
+      socket.emit('game:debug:error', { code: 'FORCE_ROUND_FAILED', message: (err as Error).message });
+    }
   }
 
   // ─── Chat ─────────────────────────────────────────────────────────────────

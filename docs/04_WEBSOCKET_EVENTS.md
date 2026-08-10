@@ -290,6 +290,20 @@ Pick up the pot pile.
 }
 ```
 
+#### `game:move:cancel_melds` (added 2026-08-03 — 75-rule rework)
+Voluntarily gives up this turn's not-yet-satisfied 75-rule melds: their cards return to your
+hand, `seventyFiveRequired` rises by 20, and your turn continues (you're still free to meld
+again or discard). Only valid on your own turn, in `CAN_MELD_OR_DISCARD`, with something
+actually pending — otherwise the server replies `game:move_invalid` with reason
+`NOTHING_TO_CANCEL`.
+```json
+{
+  "gameId": "game-uuid"
+}
+```
+Response: a normal `game:state_updated` (see below), with `lastMove.type = "CANCEL_MELDS"`
+and the rollback block described in [75-rule rollback in `lastMove`](#75-rule-rollback-in-lastmove).
+
 #### `game:reconnect`
 Sent on reconnect to request full state sync.
 ```json
@@ -297,6 +311,96 @@ Sent on reconnect to request full state sync.
   "gameId": "game-uuid"
 }
 ```
+
+---
+
+### 75-rule fields (added 2026-08-03)
+
+Every state payload the server sends you (`game:state_sync`, `game:state_updated`,
+`game:new_round`, `game:deal_start`, etc. — anywhere the full game state is included) now
+carries 4 fields describing **your own** 75-rule progress this round:
+
+| Field | Meaning |
+|-------|---------|
+| `seventyFiveActive` | `true` once your team's cumulative match score has reached 1000 — the rule applies this round |
+| `seventyFiveSatisfied` | `true` once you've met `seventyFiveRequired` this turn (or the rule is inactive) — permanent for the rest of the round |
+| `seventyFiveRequired` | Current minimum point total for your opening meld. Starts at 75; +20 each time a `cancel_melds` (manual or automatic) fires |
+| `seventyFiveTurnPoints` | Running total of THIS turn's not-yet-satisfied meld/add-to-meld plays — the "40" in "40/75" |
+
+**Behaviour change from the old rule:** a below-threshold `game:move:meld` /
+`game:move:add_to_meld` is no longer rejected. It's accepted and the cards stay on the
+table — `seventyFiveTurnPoints` climbs with each play — until the running total reaches
+`seventyFiveRequired`, at which point `seventyFiveSatisfied` flips to `true` and the melds
+are locked in for good. Two ways it can end unsatisfied instead:
+- The player calls `game:move:cancel_melds` (see above) — cards return to hand, `seventyFiveRequired += 20`.
+- The player discards while still short — the backend auto-performs the same rollback
+  (+20) before processing the discard, so a partial attempt never silently carries into
+  the next turn. Discarding with no meld attempt at all this turn is NOT penalised.
+
+#### Per-player 75-rule state (added 2026-08-05)
+
+The four fields above are **viewer-scoped** — they describe the player the payload was built
+for. A phone cannot label the *opponent's* 75-rule state from them, so the identical four
+fields are also present on **every** entry of `players[]`:
+
+```json
+"players": [
+  {
+    "id": "playerA", "userId": "playerA", "teamId": 1, "seatIndex": 0,
+    "score": 1020, "handCount": 11, "melds": [],
+    "seventyFiveActive": true,
+    "seventyFiveSatisfied": false,
+    "seventyFiveRequired": 95,
+    "seventyFiveTurnPoints": 0
+  },
+  {
+    "id": "playerB", "userId": "playerB", "teamId": 2, "seatIndex": 1,
+    "score": 870, "handCount": 11, "melds": [],
+    "seventyFiveActive": false,
+    "seventyFiveSatisfied": true,
+    "seventyFiveRequired": 75,
+    "seventyFiveTurnPoints": 0
+  }
+]
+```
+
+Render the "YOUR 75-RULE" / "OPP 75-RULE" label for a seat from that seat's `players[]`
+entry — never from the root fields, which always describe the local player. Both phones
+therefore show the same requirement for the same player.
+
+`players[i].melds` and `players[i].handCount` are recomputed from the authoritative board on
+every send, so a rolled-back card is gone from every meld array and back in the hand count
+the moment the rollback happens — on both phones, in the same payload.
+
+#### 75-rule rollback in `lastMove`
+
+Whenever a pending attempt is rolled back — manually or automatically — `lastMove` carries
+the exact rollback, and **every** viewer receives the identical block (the actor and the
+opponent both need the ids to animate the cards back to that seat's hand):
+
+| Field | Meaning |
+|-------|---------|
+| `playerId` | Seat that rolled back — resolve which screen seat to animate |
+| `returnedCardIds` | The exact cards to fly from that seat's meld area back to its hand |
+| `seventyFiveRequiredBefore` / `After` | e.g. `75` → `95`; `After` matches `players[i].seventyFiveRequired` in the same payload |
+| `seventyFiveTurnPointsBefore` / `After` | e.g. `40` → `0` |
+| `seq` | Post-move `moveCount`. Present on every `lastMove`; ignore a payload whose `seq` you have already applied instead of rebuilding the board again |
+
+| Scenario | `lastMove.type` | Rollback block |
+|----------|-----------------|----------------|
+| Manual cancel | `CANCEL_MELDS` | always present (`cardIds` still mirrors `returnedCardIds`) |
+| Discard with a pending short attempt | `DISCARD` | present, plus `autoCancelled75: true` and `discardedCardId` |
+| Ordinary discard, nothing pending | `DISCARD` | absent, `autoCancelled75: false` |
+| Server auto-played (AFK) turn end | `TIMEOUT_DISCARD` / `TIMEOUT_ADVANCE` | present + `autoCancelled75: true` when an attempt was open |
+| Successful completion | `MELD` / `ADD_TO_MELD` | absent; `players[actor].seventyFiveSatisfied` flips to `true` |
+
+The `+20` is applied exactly once, on the server, at the moment of the rollback. Every later
+payload reports the already-updated `seventyFiveRequired` — re-rendering or replaying a
+`state_updated` never re-applies it.
+
+While the 75-rule is active and unsatisfied, the AFK auto-play AI is bound by the same
+requirement: it opens only if what it can lay down that turn actually reaches
+`seventyFiveRequired`, otherwise it melds nothing and just discards.
 
 ---
 
@@ -447,6 +551,50 @@ Player's turn timed out, auto-action taken.
 }
 ```
 
+#### Turn timer fields (updated 2026-08-11)
+
+Every full-state payload carries the turn clock. A turn — anyone's, present or auto-played —
+always runs for the table's own configured length. There is no shortened window: an earlier
+version of the server dropped to a flat 5 seconds once a player had one turn auto-played,
+which both ignored the table's actual setting and made the on-screen countdown look like it
+had "reset" to 5s instead of reflecting the room. Turns now time out on schedule and still
+climb toward the 12-turn forfeit below — just at the table's own pace, same as anyone else's.
+
+| Field | Meaning |
+|-------|---------|
+| `turnDuration` | Seconds the **current** turn actually lasts — always the room setting (default 30). Size the timer ring from this |
+| `turnDurationBase` | The room's configured value — identical to `turnDuration` today; kept as a separate field for clients that want "the table's rule" by name |
+| `turnFastAutoplay` | Always `false` today (kept for client compatibility; reserved in case a shortened window is reintroduced later) |
+| `turnTimeRemaining` | Whole seconds left, measured against `turnDuration` |
+| `turnStartedAt` / `turnEndsAt` | Epoch ms. `turnEndsAt = turnStartedAt + turnDuration × 1000` — drive the countdown from this to avoid drift |
+
+All fields come from one server-side definition, which is also the value the timeout cron
+acts on.
+
+#### AFK forfeit — 12 auto-played turns ends the MATCH
+
+Each seat carries two counters in `players[]`: `missedTurns` and `awayTurns`. Both are
+match-wide tallies, cleared **only** by a manual move (see `game:move:*`) — a bare
+reconnect, or a new round starting, never resets either one. A player who disconnects,
+reconnects, and goes AFK again resumes counting from where they left off instead of getting
+a free reset. Thresholds are published as `awayAfterTurns` (6) and `forfeitAfterTurns` (12)
+so the client never hardcodes them.
+
+When `awayTurns` reaches **12**, the match ends on that same turn with a single `game:end`:
+
+- `reason: "player_abandoned"` — the forfeiter's socket was gone
+- `reason: "inactive_forfeit"` — still connected, but 12 turns were auto-played
+- `reason: "both_players_away"` with `isDraw: true`, `winnerTeam: 0` — every opponent is
+  also away, so the win isn't handed to whoever happened to cross 12 second
+
+**`game:new_round` is never emitted for this case**, including when that 12th auto-turn also
+exhausts the stock and would otherwise have ended the round: the forfeit is evaluated before
+any round transition, so the round does not advance and no new hand is dealt. A client that
+receives `game:end` should go straight to the final scoreboard.
+
+A player who was disconnected at that moment receives the same terminal payload as
+`game:end` with `reason: "already_ended"` on their next `game:join` / `game:reconnect`.
+
 #### `game:player_disconnected`
 A player disconnected mid-game.
 ```json
@@ -536,6 +684,71 @@ Game abandoned (player left, not disconnected).
   }
 }
 ```
+
+---
+
+## Debug / QA Events (TEMPORARY)
+
+Test-build only. Exists so QA can reach the 75-rule scenario without first playing a full
+round to 1000 points. Turn the whole section off on a server with `DEBUG_GAME_EVENTS=false`
+(default: on). To be removed once the 75-rule is signed off.
+
+### CLIENT → SERVER
+
+#### `game:debug:force_round`
+Re-deals the caller's live match as a later round with both teams parked on 1000 points,
+which is the only state where the 75-rule applies. Caller must be a player in the game and
+the match must still be `IN_PROGRESS`.
+
+```json
+{
+  "gameId": "game-uuid"
+}
+```
+
+`gameId` may also be sent as a bare string, and is optional — it falls back to the caller's
+active game. Optional overrides:
+
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `round` | current + 1 (min 2) | Land on a specific round number |
+| `teamScore` | `1000` | Cumulative score given to BOTH teams. Below 1000 the 75-rule stays OFF — use it to check the rule does **not** fire |
+
+Does **not** score, settle, reward or end the match, and does not touch the AFK / forfeit
+counters. Every other player at the table simply receives the normal `game:new_round`.
+
+### SERVER → CLIENT
+
+#### `game:debug:force_round_ack`
+Sent to the caller only.
+```json
+{
+  "event": "game:debug:force_round_ack",
+  "data": {
+    "gameId": "game-uuid",
+    "round": 2,
+    "matchScores": { "1": 1000, "2": 1000 },
+    "seventyFiveRule": {
+      "player-uuid": { "active": true, "requirement": 75, "satisfied": false }
+    },
+    "currentPlayerId": "player-uuid"
+  }
+}
+```
+
+#### `game:debug:error`
+```json
+{
+  "event": "game:debug:error",
+  "data": { "code": "FORCE_ROUND_FAILED", "message": "GAME_NOT_IN_PROGRESS" }
+}
+```
+Codes: `DEBUG_DISABLED`, `INVALID_PAYLOAD`, `FORCE_ROUND_FAILED` (message is `NOT_IN_GAME`,
+`GAME_NOT_IN_PROGRESS` or `Game not found`).
+
+#### `game:new_round` (broadcast)
+The standard round-transition payload, plus `"debugForced": true`. Clients that ignore the
+extra field need no changes at all.
 
 ---
 
@@ -730,6 +943,7 @@ All WebSocket errors follow this format:
 | `NOT_IN_GAME` | Not a participant in this game |
 | `NOT_YOUR_TURN` | Move submitted out of turn |
 | `INVALID_MOVE` | Move violates rules |
+| `NOTHING_TO_CANCEL` | `game:move:cancel_melds` sent with no pending 75-rule melds to return |
 | `GAME_ENDED` | Game already over |
 | `RATE_LIMITED` | Too many events sent |
 
