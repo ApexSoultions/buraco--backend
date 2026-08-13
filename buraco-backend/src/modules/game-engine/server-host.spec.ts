@@ -1,5 +1,5 @@
 import { ForbiddenException } from '@nestjs/common';
-import { GameHost, GameStatus } from '@prisma/client';
+import { GameHost, GameStatus, MoveType } from '@prisma/client';
 import { GameEngineService, GameState } from './game-engine.service';
 
 // Covers the behaviour that makes this backend — not a player's phone — the match host:
@@ -566,6 +566,82 @@ describe('reconnecting does not reset the AI-turn counters', () => {
 
     expect(state.forfeitMissedTurns![P1]).toBe(5);
     expect(state.consecutiveMissedTurns![P1]).toBe(5);
+  });
+});
+
+// ── QA scenarios from the AFK-reset report: reconnect-only vs. reconnect-then-move ────
+describe('reconnect vs. reconnect+move — which one actually clears the streak', () => {
+  function card(id: string, rank: any = '5', suit: any = 'CLUBS') {
+    return { id, suit, rank, isWild: rank === 'JOKER' || rank === '2' } as any;
+  }
+
+  it('scenario 1 — reconnect only: awayTurns stays 7 through state_sync/state_updated, then climbs to 8 on the next AFK timeout', async () => {
+    const state = gameState({
+      turnPhase: 'MUST_DRAW',
+      stockPile: [card('s1'), card('s2'), card('s3'), card('s4'), card('s5')],
+      discardPile: [card('d1')],
+      hands: { [P1]: [card('h1'), card('h2')], [P2]: [] },
+      forfeitMissedTurns: { [P1]: 7, [P2]: 0 },
+      consecutiveMissedTurns: { [P1]: 7, [P2]: 0 },
+      players: [
+        { userId: P1, teamId: 1, isConnected: false },
+        { userId: P2, teamId: 2, isConnected: true },
+      ],
+      currentTurnIndex: 0, // P1's turn
+    });
+    const { service } = buildService({ state });
+
+    // game:join / game:reconnect — no move made.
+    await service.markPlayerReconnected(GAME_ID, P1);
+
+    // What state_sync / state_updated actually hands the client — this is what the Unity
+    // overlay renders via SyncAutoTurnsFromAuthority, so it's the payload that matters,
+    // not just the raw redis field.
+    let view: any = await service.getGameState(GAME_ID, P1);
+    expect(view.players.find((p: any) => p.userId === P1)).toMatchObject({ awayTurns: 7 });
+
+    // Still no move — next AFK timeout fires (this is what the cron does once turnDuration
+    // elapses again).
+    await service.handleTurnTimeout(GAME_ID);
+
+    expect(state.forfeitMissedTurns![P1]).toBe(8);
+    view = await service.getGameState(GAME_ID, P1);
+    expect(view.players.find((p: any) => p.userId === P1)).toMatchObject({ awayTurns: 8 });
+  });
+
+  it('scenario 2 — reconnect + one manual move: the move (not the reconnect) resets the streak, so the next AFK run starts at 1, not 8', async () => {
+    const state = gameState({
+      turnPhase: 'CAN_MELD_OR_DISCARD', // already drew — one discard is the "one manual move"
+      stockPile: [card('s1'), card('s2'), card('s3'), card('s4'), card('s5')],
+      discardPile: [card('d1')],
+      hands: { [P1]: [card('h1'), card('h2')], [P2]: [] },
+      forfeitMissedTurns: { [P1]: 7, [P2]: 0 },
+      consecutiveMissedTurns: { [P1]: 7, [P2]: 0 },
+      players: [
+        { userId: P1, teamId: 1, isConnected: false },
+        { userId: P2, teamId: 2, isConnected: true },
+      ],
+      currentTurnIndex: 0, // P1's turn
+    });
+    const { service } = buildService({ state });
+
+    await service.markPlayerReconnected(GAME_ID, P1);
+    expect(state.forfeitMissedTurns![P1]).toBe(7); // reconnect alone: unchanged
+
+    // The one manual move.
+    await service.processMove(GAME_ID, P1, { type: MoveType.DISCARD, cardIds: ['h1'] });
+    expect(state.forfeitMissedTurns![P1]).toBe(0);
+    expect(state.consecutiveMissedTurns![P1]).toBe(0);
+
+    // AFK again — back to P1's turn (stands in for P2 having played theirs in between) and
+    // let the timeout fire. This must be miss #1 of a fresh streak, not #8 of the old one.
+    state.currentTurnIndex = state.turnOrder.indexOf(P1);
+    await service.handleTurnTimeout(GAME_ID);
+
+    expect(state.forfeitMissedTurns![P1]).toBe(1);
+    expect(state.consecutiveMissedTurns![P1]).toBe(1);
+    const view: any = await service.getGameState(GAME_ID, P1);
+    expect(view.players.find((p: any) => p.userId === P1)).toMatchObject({ awayTurns: 1 });
   });
 });
 

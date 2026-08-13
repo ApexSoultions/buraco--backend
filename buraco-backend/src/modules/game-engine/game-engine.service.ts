@@ -737,8 +737,20 @@ export class GameEngineService implements OnModuleInit {
 
     // Any successful manual move resets both the cadence counter and the forfeit counter.
     if (!state.consecutiveMissedTurns) state.consecutiveMissedTurns = {};
-    state.consecutiveMissedTurns[playerId] = 0;
     if (!state.forfeitMissedTurns) state.forfeitMissedTurns = {};
+    // TEMP DIAGNOSTIC (awayTurns-reset investigation): only an actual manual move should
+    // ever clear a nonzero streak — logging every occurrence lets us confirm from server
+    // logs that a reported reset really did come through here, on this move, and not from
+    // some other write racing the same Redis key. Remove once the investigation is closed.
+    const priorForfeit = state.forfeitMissedTurns[playerId] ?? 0;
+    const priorConsecutive = state.consecutiveMissedTurns[playerId] ?? 0;
+    if (priorForfeit > 0 || priorConsecutive > 0) {
+      this.logger.warn(
+        `[afk-counter] processMove(${move.type}) by ${playerId} in game ${gameId} cleared an ` +
+        `active AFK streak: forfeitMissedTurns ${priorForfeit}->0, consecutiveMissedTurns ${priorConsecutive}->0`,
+      );
+    }
+    state.consecutiveMissedTurns[playerId] = 0;
     state.forfeitMissedTurns[playerId] = 0;
 
     const turnPhase: TurnPhase = state.turnPhase ?? 'MUST_DRAW';
@@ -1750,8 +1762,17 @@ export class GameEngineService implements OnModuleInit {
 
     // A deliberate action, same as any other manual move — proves the player is present.
     if (!state.consecutiveMissedTurns) state.consecutiveMissedTurns = {};
-    state.consecutiveMissedTurns[playerId] = 0;
     if (!state.forfeitMissedTurns) state.forfeitMissedTurns = {};
+    // TEMP DIAGNOSTIC (awayTurns-reset investigation) — see processMove for rationale.
+    const cancelPriorForfeit = state.forfeitMissedTurns[playerId] ?? 0;
+    const cancelPriorConsecutive = state.consecutiveMissedTurns[playerId] ?? 0;
+    if (cancelPriorForfeit > 0 || cancelPriorConsecutive > 0) {
+      this.logger.warn(
+        `[afk-counter] cancelMelds by ${playerId} in game ${gameId} cleared an active AFK streak: ` +
+        `forfeitMissedTurns ${cancelPriorForfeit}->0, consecutiveMissedTurns ${cancelPriorConsecutive}->0`,
+      );
+    }
+    state.consecutiveMissedTurns[playerId] = 0;
     state.forfeitMissedTurns[playerId] = 0;
 
     // Counts as a move so the payload carries a fresh sequence number — see `seq` in
@@ -2325,6 +2346,17 @@ export class GameEngineService implements OnModuleInit {
     const player = state.players.find(p => p.userId === userId);
     if (!player) return;
     player.isConnected = true;
+    // TEMP DIAGNOSTIC (awayTurns-reset investigation): this call never mutates either
+    // counter (see comment below) — logging what it READ, next to handleTurnTimeout's own
+    // read/write log, lets the two be lined up by timestamp on a real repro to see whether
+    // this read-modify-write cycle raced one from an in-flight auto-play turn and, by
+    // writing back its own (stale) unmodified copy of the counters, clobbered a concurrent
+    // increment. Remove once the investigation is closed.
+    this.logger.log(
+      `[afk-counter] markPlayerReconnected ${userId} in game ${gameId}: observed ` +
+      `forfeitMissedTurns=${state.forfeitMissedTurns?.[userId] ?? 0}, ` +
+      `consecutiveMissedTurns=${state.consecutiveMissedTurns?.[userId] ?? 0} (this call does not change them)`,
+    );
     // If the timer already expired while this player was away and it is still their
     // turn, give them a fresh full-duration window so the next cron tick does not
     // immediately auto-play on their behalf. Otherwise leave turnStartedAt untouched
@@ -2477,7 +2509,18 @@ export class GameEngineService implements OnModuleInit {
     const priorMissed = state.consecutiveMissedTurns[playerId] ?? 0;
     state.consecutiveMissedTurns[playerId] = priorMissed + 1;
     if (!state.forfeitMissedTurns) state.forfeitMissedTurns = {};
-    state.forfeitMissedTurns[playerId] = (state.forfeitMissedTurns[playerId] ?? 0) + 1;
+    const priorForfeit = state.forfeitMissedTurns[playerId] ?? 0;
+    state.forfeitMissedTurns[playerId] = priorForfeit + 1;
+    // TEMP DIAGNOSTIC (awayTurns-reset investigation): this function reads state once up
+    // front, then stays in memory across several awaits (Prisma writes, the per-meld
+    // pacing delay) before its own setJson persists it — the widest window of any writer
+    // on this key. Logging the read-time value here, next to markPlayerReconnected's own
+    // read-time log, lets us line the two up by timestamp and see whether a reconnect's
+    // write actually landed AFTER this one and clobbered it back down. Remove once closed.
+    this.logger.log(
+      `[afk-counter] handleTurnTimeout auto-played for ${playerId} in game ${gameId}: ` +
+      `forfeitMissedTurns ${priorForfeit}->${priorForfeit + 1}, consecutiveMissedTurns ${priorMissed}->${priorMissed + 1}`,
+    );
     // Smart play activates on the second and subsequent misses (priorMissed ≥ 1).
     const useSmartPlay = priorMissed >= 1;
 
