@@ -2,6 +2,13 @@ import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundEx
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { GameHost, GameMode, GameStatus, GameVariant, MoveType, Prisma, RoomStatus } from '@prisma/client';
 
+// Once a player has already missed a turn this match (consecutiveMissedTurns >= 1), the
+// AI takes their NEXT turn over after only this many seconds instead of waiting out the
+// table's full turnDuration — see internalTurnTimeoutSeconds. Applies ONLY to the internal
+// decision of when the server acts; the countdown shown to clients never uses this value
+// (see effectiveTurnSeconds), so a 30s table still visibly reads 30, it just gets acted on
+// early once someone is already mid-AFK-streak.
+const AFK_REPEAT_MISS_TIMEOUT_SECONDS = 5;
 // Forfeit a player after this many FULLY auto-played turns. Counted once per turn
 // (see handleTurnTimeout) and accumulated per-player across the whole match — a new
 // round/hand does NOT reset it; only a manual move by that player clears it.
@@ -306,7 +313,7 @@ export class GameEngineService implements OnModuleInit {
           if (state.turnPhase === 'ROUND_ENDED') return;
 
           const currentPlayerId = state.turnOrder[state.currentTurnIndex];
-          const effectiveTimeout = this.effectiveTurnSeconds(state, currentPlayerId);
+          const effectiveTimeout = this.internalTurnTimeoutSeconds(state, currentPlayerId);
           if (Date.now() - state.turnStartedAt > effectiveTimeout * 1000) {
             // Idempotency lock. This cron runs EVERY_5_SECONDS over ALL games via
             // Promise.all, and @Cron does not prevent a slow run from overlapping the
@@ -570,21 +577,33 @@ export class GameEngineService implements OnModuleInit {
   }
 
   /**
-   * Seconds the CURRENT turn actually lasts before the server auto-plays it.
-   *
-   * Always `state.turnDuration` — the table's own configured turn length — whether the
-   * current player is present or has already had turns auto-played. Previously this
-   * dropped to a flat 5s once a player had missed a turn, regardless of what the table was
-   * set to, which both raced a table's own (possibly longer or shorter) turn length and
-   * made the "AI takes over" countdown appear to reset to a fixed 5s instead of scaling
-   * with the room. An absent player's turns are still timed out on schedule and still climb
-   * toward the 12-turn forfeit — they just do so at the table's own pace, same as anyone
-   * else's turn. Kept as a single definition — used by the cron that fires the timeout, by
-   * markPlayerReconnected, and by the client view — so the number the phones count down is
-   * by construction the same number the server acts on.
+   * Seconds the CURRENT turn is shown counting down from — always `state.turnDuration`,
+   * the table's own configured turn length, no matter what has happened on prior turns.
+   * Feeds ONLY the client-facing view (turnDuration/turnDurationBase/turnFastAutoplay/
+   * turnEndsAt/turnTimeRemaining in buildClientView) — a 30s table always visibly reads 30.
+   * The server's own decision of when it actually acts is a separate number, see
+   * internalTurnTimeoutSeconds; the two used to be the same value, which made the visible
+   * countdown itself snap to 5s whenever a player was mid-AFK-streak.
    */
   private effectiveTurnSeconds(state: GameState, _playerId: string): number {
     return state.turnDuration;
+  }
+
+  /**
+   * Seconds the CURRENT turn actually lasts before the server auto-plays it. This is the
+   * real deadline the timeout cron and a reconnect check act on — deliberately separate
+   * from effectiveTurnSeconds, which only feeds what the client sees.
+   *
+   * A player's first miss of the match still gets the table's full turnDuration. From their
+   * second consecutive miss onward (consecutiveMissedTurns[playerId] >= 1 — already reset to
+   * 0 by any manual move, see processMove, and deliberately left untouched by a bare
+   * reconnect, see markPlayerReconnected) the server acts after only
+   * AFK_REPEAT_MISS_TIMEOUT_SECONDS, e.g. a 30s table counts down to 25 and the AI already
+   * has taken the turn. The visible countdown is untouched either way.
+   */
+  private internalTurnTimeoutSeconds(state: GameState, playerId: string): number {
+    const priorMisses = state.consecutiveMissedTurns?.[playerId] ?? 0;
+    return priorMisses >= 1 ? AFK_REPEAT_MISS_TIMEOUT_SECONDS : state.turnDuration;
   }
 
   /**
@@ -2358,11 +2377,12 @@ export class GameEngineService implements OnModuleInit {
       `consecutiveMissedTurns=${state.consecutiveMissedTurns?.[userId] ?? 0} (this call does not change them)`,
     );
     // If the timer already expired while this player was away and it is still their
-    // turn, give them a fresh full-duration window so the next cron tick does not
-    // immediately auto-play on their behalf. Otherwise leave turnStartedAt untouched
-    // so the remaining time is resumed rather than reset.
+    // turn, give them a fresh window (still governed by internalTurnTimeoutSeconds — a
+    // player already mid-AFK-streak only gets a fresh 5s, not a bonus full turnDuration)
+    // so the next cron tick does not immediately auto-play on their behalf. Otherwise
+    // leave turnStartedAt untouched so the remaining time is resumed rather than reset.
     if (state.status === GameStatus.IN_PROGRESS && state.turnOrder[state.currentTurnIndex] === userId) {
-      const effectiveTimeout = this.effectiveTurnSeconds(state, userId);
+      const effectiveTimeout = this.internalTurnTimeoutSeconds(state, userId);
       const expired = Date.now() - state.turnStartedAt > effectiveTimeout * 1000;
       if (expired) {
         state.turnStartedAt = Date.now();
@@ -2654,7 +2674,46 @@ export class GameEngineService implements OnModuleInit {
         return { playerId, autoAction: drawnCard ? 'DRAW_THEN_DISCARD' : 'DISCARD', card: discardedCard };
       }
 
-      const playerTeamId = state.players.find(p => p.userId === playerId)?.teamId ?? 1;
+      // No pot — this can only legally end the round by CLOSING. Re-validate exactly like
+      // processMove's manual DISCARD does (Buraco + full required pot count, never a
+      // Classic wild, never Professional Direct). pickLegalDiscardIndex/aiPickDiscardIndex
+      // should already keep us from reaching here illegally, but finalizeGame answers to
+      // this same authority for a human close, so the AI/timeout path must too — otherwise
+      // a stale/foreign discardIdx can still end a round nobody actually won.
+      const playerTeamId  = state.players.find(p => p.userId === playerId)?.teamId ?? 1;
+      const isClassic     = state.mode === GameMode.CLASSIC;
+      const teamPlayerIds = state.players.filter(p => p.teamId === playerTeamId).map(p => p.userId);
+      const teamHasBuraco = teamPlayerIds.some(uid => hasBuraco(state.melds[uid] || []));
+      const teamPotCount  = (state.potCollectedByTeam ?? []).filter(id => id === playerTeamId).length;
+      const requiredPots  = isClassic ? 1 : 2;
+      const legalClose = teamHasBuraco
+        && teamPotCount >= requiredPots
+        && !(isClassic && discardedCard.isWild)
+        && !(state.mode === GameMode.PROFESSIONAL && state.endMode === 'DIRECT');
+
+      if (!legalClose) {
+        // Not a legal close — undo the discard and treat this exactly like "no legal
+        // discard": keep the card in hand, advance the turn, TIMEOUT_ADVANCE.
+        this.logger.warn(
+          `Timeout: last-card discard for ${playerId} was not a legal pot-take or close, ` +
+          `keeping card and advancing turn instead of finalizing`,
+        );
+        state.discardPile.pop();
+        hand.push(discardedCard);
+        state.currentTurnIndex = (state.currentTurnIndex + 1) % state.turnOrder.length;
+        state.turnStartedAt    = Date.now();
+        state.turnPhase        = 'MUST_DRAW';
+        await this.redis.setJson(this.stateKey(gameId), state, 86400);
+        if (!drawnCard || autoCancelRollback) {
+          await this.socketService.emitPerPlayer(`game:${gameId}`, 'game:state_updated', async (uid) => ({
+            lastMove: { type: 'TIMEOUT_ADVANCE', playerId, isAuto: true, ...seventyFiveFields },
+            ...this.buildClientView(state, uid),
+          }));
+        }
+        if (await this.checkAndForfeit(gameId, playerId, state)) return;
+        return { playerId, autoAction: 'ADVANCE_NO_DISCARD' };
+      }
+
       state.moveCount++;
       await this.redis.setJson(this.stateKey(gameId), state, 86400);
       await this.prisma.gameMove.create({
@@ -2698,20 +2757,36 @@ export class GameEngineService implements OnModuleInit {
 
     if (hand.length > 1) return Math.floor(Math.random() * hand.length);
 
-    // hand.length === 1 — discarding it would attempt to close; validate conditions
-    const playerTeamId = state.players.find(p => p.userId === playerId)?.teamId ?? 1;
-    const teamPotCount = (state.potCollectedByTeam ?? []).filter(id => id === playerTeamId).length;
-    const hasPotToAward = teamPotCount < (state.mode === GameMode.CLASSIC ? 1 : 2)
-      && state.potPiles.some(p => p.length > 0);
-    if (hasPotToAward) return 0;
-
-    const card = hand[0];
-    if (state.mode === GameMode.CLASSIC && card.isWild) return -1;
-
+    // hand.length === 1 — discarding it empties the hand, so it's only legal if it either
+    // takes an awardable pot or legally closes the game. Must mirror processMove's manual
+    // DISCARD case (and the tryAwardPot rules it defers to) exactly, or the AI/timeout path
+    // can offer up a "legal" discard that would actually be rejected coming from a player.
+    const isClassic     = state.mode === GameMode.CLASSIC;
+    const playerTeamId  = state.players.find(p => p.userId === playerId)?.teamId ?? 1;
     const teamPlayerIds = state.players.filter(p => p.teamId === playerTeamId).map(p => p.userId);
     const teamHasBuraco = teamPlayerIds.some(uid => hasBuraco(state.melds[uid] || []));
+    const teamPotCount  = (state.potCollectedByTeam ?? []).filter(id => id === playerTeamId).length;
+
+    // Professional Direct: closing by discard is never allowed, full stop — the team must
+    // empty its hand on-the-fly via a meld/add-to-meld instead (same as processMove).
+    if (!isClassic && state.endMode === 'DIRECT') return -1;
+
+    // Would this discard take the (first) pot rather than close the game? Mirrors
+    // tryAwardPot's own DISCARD-path rules: only the first pot (a second pot is
+    // never awarded via discard), and in Professional only once the team already
+    // has a Buraco.
+    const wouldAwardPot = teamPotCount === 0
+      && (isClassic || teamHasBuraco)
+      && state.potPiles.some(p => p.length > 0);
+    if (wouldAwardPot) return 0;
+
+    // No pot to take — this discard would have to legally CLOSE the game instead.
+    const card = hand[0];
+    if (isClassic && card.isWild) return -1;
     if (!teamHasBuraco) return -1;
-    if (teamPotCount === 0) return -1;
+
+    const requiredPots = isClassic ? 1 : 2;
+    if (teamPotCount < requiredPots) return -1;
 
     return 0;
   }
