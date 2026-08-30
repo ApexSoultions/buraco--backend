@@ -341,6 +341,28 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     }
   }
 
+  /**
+   * `game:deal_complete` — this client has finished animating the cards onto the table.
+   *
+   * The turn clock does not start until EVERY seat has sent this (or the server's
+   * backstop expires), so nobody burns part of their first turn — or an AFK strike —
+   * watching the deal. The server broadcasts `game:dealing_complete` to the whole table
+   * once the clock actually starts; until then every move is refused with
+   * "Please wait until all players are done dealing".
+   *
+   * Safe to send more than once and safe to omit: a client that never sends it simply
+   * waits out the server's backstop instead of freezing the match.
+   */
+  @SubscribeMessage('game:deal_complete')
+  async handleDealComplete(@ConnectedSocket() socket: Socket, @MessageBody() data: { gameId: string }) {
+    const userId = socket.data.userId;
+    try {
+      await this.gameEngine.markDealAnimationComplete(data.gameId, userId);
+    } catch (err) {
+      this.logger.error(`game:deal_complete failed for ${userId} in game ${data.gameId}`, err);
+    }
+  }
+
   @SubscribeMessage('game:reconnect')
   async handleGameReconnect(@ConnectedSocket() socket: Socket, @MessageBody() data: { gameId: string }) {
     const userId = socket.data.userId;
