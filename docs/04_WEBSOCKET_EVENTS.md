@@ -304,6 +304,19 @@ actually pending — otherwise the server replies `game:move_invalid` with reaso
 Response: a normal `game:state_updated` (see below), with `lastMove.type = "CANCEL_MELDS"`
 and the rollback block described in [75-rule rollback in `lastMove`](#75-rule-rollback-in-lastmove).
 
+#### `game:deal_complete` (added 2026-08-30 — deal gate)
+Sent once this client has finished animating the cards onto the table, after a
+`game:deal_start` (match start) or a `game:new_round` (every later round).
+```json
+{
+  "gameId": "game-uuid"
+}
+```
+The turn timer does not start until **every** seat has sent this — see
+[Deal gate](#deal-gate--the-turn-timer-starts-after-dealing) below. Safe to send more than
+once. A client that never sends it is not fatal: the server opens the gate on its own after
+15 seconds, but the table then sits idle for that whole window, so send it.
+
 #### `game:reconnect`
 Sent on reconnect to request full state sync.
 ```json
@@ -439,6 +452,28 @@ Game has started, sent to all players.
 }
 ```
 
+#### `game:toss_result`
+One event per toss round, in order, before the deal. The client ignores rounds with
+`isTie: true` and animates the decisive `isTie: false` one, which carries `winnerPlayerId` /
+`winnerSeatIndex` — that seat plays first.
+```json
+{
+  "gameId": "game-uuid",
+  "round": 1,
+  "isTie": false,
+  "winnerPlayerId": "uuid",
+  "winnerSeatIndex": 2,
+  "players": [
+    { "playerId": "uuid", "seatIndex": 0, "card": { "id": "…", "suit": "HEARTS", "rank": "K", "isWild": false }, "rankValue": 13 }
+  ]
+}
+```
+
+**No Jokers in the toss, in either mode** (fixed 2026-08-30). The toss deck is built without
+them, so `rank` is never `"JOKER"` here and `rankValue` runs 2…14 — Ace (14) is the highest
+card a seat can toss, then King (13) down to 2. Classic's *play* deck still contains its four
+jokers; this is the toss draw only. Equal top cards are a tie and the round is re-tossed.
+
 #### `game:player_turn`
 Signals whose turn it is.
 ```json
@@ -567,9 +602,40 @@ climb toward the 12-turn forfeit below — just at the table's own pace, same as
 | `turnFastAutoplay` | Always `false` today (kept for client compatibility; reserved in case a shortened window is reintroduced later) |
 | `turnTimeRemaining` | Whole seconds left, measured against `turnDuration` |
 | `turnStartedAt` / `turnEndsAt` | Epoch ms. `turnEndsAt = turnStartedAt + turnDuration × 1000` — drive the countdown from this to avoid drift |
+| `dealingComplete` | `false` while cards are still being dealt at this table. Hold the timer UI until it is `true` — see below |
 
 All fields come from one server-side definition, which is also the value the timeout cron
 acts on.
+
+#### Deal gate — the turn timer starts after dealing (added 2026-08-30)
+
+The clock used to start the instant the server dealt, so the first player's countdown — and
+their AFK strike with it — ran while every phone was still animating cards onto the table.
+It now starts when the **deal finishes**, at match start and at every new round.
+
+Sequence:
+
+1. Server deals and sends `game:deal_start` (round 1) or `game:new_round` (later rounds).
+   Both carry `dealingComplete: false`.
+2. Each client animates the deal, then sends **`game:deal_complete`**.
+3. Once every seat has reported in, the server starts the turn clock **from that moment** and
+   broadcasts **`game:dealing_complete`** — a normal full-state payload, now with
+   `dealingComplete: true` and a fresh `turnStartedAt` / `turnEndsAt`. Start the countdown here.
+
+While `dealingComplete` is `false`:
+
+- **No countdown.** `turnTimeRemaining` stays at the full `turnDuration` and `turnEndsAt`
+  keeps sliding forward, so nothing ticks down however long the deal takes.
+- **No AFK autoplay.** The timeout cron skips the table entirely; no `missedTurns` /
+  `awayTurns` strike can be scored against a turn that has not started.
+- **No moves.** Any `game:move:*` is rejected with `game:move_invalid` and
+  `reason: "Please wait until all players are done dealing"` — including from the player
+  whose turn it is. Show that text and keep the board locked.
+
+**Backstop.** If a seat never sends `game:deal_complete` (a client that predates the event, a
+player who never connects), the server opens the gate by itself 15 seconds after the deal and
+broadcasts `game:dealing_complete` as normal. A missing ack costs that table an idle window;
+it can never freeze a match.
 
 #### AFK forfeit — 12 auto-played turns ends the MATCH
 

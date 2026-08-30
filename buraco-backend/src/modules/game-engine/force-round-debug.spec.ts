@@ -91,6 +91,17 @@ function buildService(state: GameState | null = gameState()) {
   return { service, prisma, redis, economy, stats, socket, state };
 }
 
+/**
+ * A forced round is a real deal, so it opens the deal gate exactly like a normal round
+ * transition does: the turn clock stays stopped and moves are refused until every seat's
+ * client reports its deal animation finished. Tests that go on to play a move ack it here,
+ * which is precisely what the two clients do over `game:deal_complete`.
+ */
+async function finishDealing(service: GameEngineService) {
+  await service.markDealAnimationComplete(GAME_ID, P1);
+  await service.markDealAnimationComplete(GAME_ID, P2);
+}
+
 describe('game:debug:force_round — forceRoundForTesting', () => {
   it('jumps to round 2 with both teams on 1000 and the 75-rule armed', async () => {
     const { service, state } = buildService();
@@ -119,6 +130,7 @@ describe('game:debug:force_round — forceRoundForTesting', () => {
     const cheap = [card('HEARTS', '4', 'c1'), card('CLUBS', '4', 'c2'), card('SPADES', '4', 'c3')];
     state!.hands[P1] = [...cheap, card('HEARTS', 'K', 'k1'), card('CLUBS', '9', 'n1')];
     state!.turnPhase = 'CAN_MELD_OR_DISCARD';
+    await finishDealing(service);
 
     const result = await service.processMove(GAME_ID, P1, { type: MoveType.PLAY_MELD, cardIds: ['c1', 'c2', 'c3'] });
 
@@ -140,6 +152,7 @@ describe('game:debug:force_round — forceRoundForTesting', () => {
     const cheap = [card('HEARTS', '4', 'c1'), card('CLUBS', '4', 'c2'), card('SPADES', '4', 'c3')];
     state!.hands[P1] = [...cheap, card('HEARTS', 'K', 'k1'), card('CLUBS', '9', 'n1')];
     state!.turnPhase = 'CAN_MELD_OR_DISCARD';
+    await finishDealing(service);
 
     await service.processMove(GAME_ID, P1, { type: MoveType.PLAY_MELD, cardIds: ['c1', 'c2', 'c3'] });
     expect(state!.melds[P1]).toHaveLength(1);

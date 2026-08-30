@@ -28,6 +28,13 @@ const AUTOPLAY_MOVE_PACING_MS = 400;
 // Cumulative team score at which the 75-rule switches on for that team's players: their
 // FIRST meld of the round must be worth at least 75 points (+20 per failed attempt).
 const SEVENTY_FIVE_RULE_MIN_SCORE = 1000;
+// How long the server will hold the turn clock while clients animate a deal, waiting for
+// every seat's `game:deal_complete`. The gate normally opens the moment the last ack
+// lands; this is only the backstop, because a seat that never connects (or a build that
+// never acks) must not be able to freeze a server-hosted match forever.
+const DEAL_ANIMATION_MAX_WAIT_MS = 15_000;
+/** Verbatim `game:move_invalid` reason for a move attempted before the deal has finished. */
+export const DEALING_IN_PROGRESS_MESSAGE = 'Please wait until all players are done dealing';
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { RedisService } from '../../common/redis/redis.service';
@@ -161,6 +168,19 @@ export interface GameState {
    * signal was `moveCount > 0`, so a reconnect during the very first turn re-dealt.
    */
   dealtTo?: string[];
+  /**
+   * True while cards are still being dealt/animated at the start of a round (or the
+   * match) and the turn clock has therefore NOT started. Nothing moves while this is
+   * set: no countdown, no AFK auto-play, no accepted moves. Cleared by
+   * `markDealAnimationComplete` once every seat has acked `game:deal_complete`, or by
+   * the DEAL_ANIMATION_MAX_WAIT_MS backstop — and clearing it is what starts the clock.
+   * Absent on states written before this gate existed, which read as "not dealing".
+   */
+  dealPending?: boolean;
+  /** User ids that have reported their deal animation finished for the current deal. */
+  dealAckBy?: string[];
+  /** When the current deal was sent — the DEAL_ANIMATION_MAX_WAIT_MS backstop counts from here. */
+  dealStartedAt?: number;
   targetScore: number;
   matchScores: Record<number, number>;
   winnerTeam?: number;
@@ -281,6 +301,75 @@ export class GameEngineService implements OnModuleInit {
     return (state.hostedBy ?? GameHost.SERVER) === GameHost.SERVER;
   }
 
+  // ── Deal gate ──────────────────────────────────────────────────────────────
+  //
+  // The turn clock used to start the instant the server dealt (startGame / dealNewRound),
+  // so the first player's countdown was already running — and their AFK timer with it —
+  // while every phone was still animating cards onto the table. The clock now starts when
+  // the DEAL finishes, not when it is sent.
+
+  /** Opens the current deal's gate: every seat is dealt, nobody has acked, clock stopped. */
+  private openDealGate(state: GameState): void {
+    state.dealPending   = true;
+    state.dealAckBy     = [];
+    state.dealStartedAt = Date.now();
+  }
+
+  /**
+   * True while at least one seat is still animating the deal. No countdown, no AFK
+   * auto-play and no accepted move while this holds. Falls open on its own once
+   * DEAL_ANIMATION_MAX_WAIT_MS has passed, so a seat that never connects — or a client
+   * build that does not yet send `game:deal_complete` — cannot stall the match.
+   */
+  private isDealingInProgress(state: GameState): boolean {
+    if (!state.dealPending) return false;
+    const acked = state.dealAckBy ?? [];
+    if (state.players.every(p => acked.includes(p.userId))) return false;
+    return Date.now() - (state.dealStartedAt ?? 0) < DEAL_ANIMATION_MAX_WAIT_MS;
+  }
+
+  /**
+   * Closes the gate and starts the turn clock FROM NOW, so the player about to move gets
+   * their full turn rather than whatever was left after the animation.
+   * Returns true only when this call is what closed it — the caller then owns persisting
+   * the state and telling the table the clock is running.
+   */
+  private closeDealGateIfReady(state: GameState): boolean {
+    if (!state.dealPending) return false;
+    if (this.isDealingInProgress(state)) return false;
+    state.dealPending   = false;
+    state.turnStartedAt = Date.now();
+    return true;
+  }
+
+  /**
+   * Records that `userId`'s client finished animating the current deal. Once every seat
+   * has reported in, the gate closes, the turn clock starts and the table is told.
+   * Returns true when this ack is the one that started the clock.
+   */
+  async markDealAnimationComplete(gameId: string, userId: string): Promise<boolean> {
+    const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
+    if (!state || !state.dealPending) return false;
+    if (!state.players.some(p => p.userId === userId)) return false;
+
+    const acked = state.dealAckBy ?? [];
+    if (!acked.includes(userId)) state.dealAckBy = [...acked, userId];
+
+    const started = this.closeDealGateIfReady(state);
+    await this.redis.setJson(this.stateKey(gameId), state, 86400);
+    if (started) await this.broadcastDealComplete(state);
+    return started;
+  }
+
+  /** Tells every seat the deal is over and the turn clock is now running. */
+  private async broadcastDealComplete(state: GameState): Promise<void> {
+    await this.socketService.emitPerPlayer(
+      `game:${state.gameId}`,
+      'game:dealing_complete',
+      async (uid) => this.buildClientView(state, uid),
+    );
+  }
+
   /**
    * Drives every server-hosted match forward, whether or not anyone is connected. This is
    * what makes the backend — not a player's phone — the match host: two players can close
@@ -311,6 +400,17 @@ export class GameEngineService implements OnModuleInit {
             return;
           }
           if (state.turnPhase === 'ROUND_ENDED') return;
+
+          // Cards are still landing on somebody's table: the turn clock has not started,
+          // so there is nothing to time out. This tick is also the DEAL_ANIMATION_MAX_WAIT_MS
+          // backstop — when it has expired, close the gate here and start the clock.
+          if (state.dealPending) {
+            if (this.closeDealGateIfReady(state)) {
+              await this.redis.setJson(this.stateKey(gameId), state, 86400);
+              await this.broadcastDealComplete(state);
+            }
+            return;
+          }
 
           const currentPlayerId = state.turnOrder[state.currentTurnIndex];
           const effectiveTimeout = this.internalTurnTimeoutSeconds(state, currentPlayerId);
@@ -444,6 +544,11 @@ export class GameEngineService implements OnModuleInit {
       setupComplete: true,
       tossComplete: true,
       dealtTo: [],
+      // The opening deal has only just been SENT — the turn clock starts when the last
+      // client reports it finished animating (see the deal gate above), not here.
+      dealPending: true,
+      dealAckBy: [],
+      dealStartedAt: now,
       consecutiveMissedTurns: {},
       forfeitMissedTurns: {},
       // Round 1: all matchScores are 0 → 75-rule inactive for everyone
@@ -550,6 +655,8 @@ export class GameEngineService implements OnModuleInit {
       turnOrder:            game.players.map(p => p.userId),
       currentTurnIndex:     0,
       turnStartedAt:        0,
+      // Match is over — nothing left to deal, so the gate reads as open.
+      dealingComplete:      true,
       turnDuration:         0,
       turnDurationBase:     0,
       turnFastAutoplay:     false,
@@ -679,6 +786,14 @@ export class GameEngineService implements OnModuleInit {
     // length (see effectiveTurnSeconds), whether or not the current player is absent.
     const effectiveTurnDuration = this.effectiveTurnSeconds(state, currentPlayerId);
 
+    // While the deal is still animating the turn clock has NOT started, so this view must
+    // not hand the client a deadline it can count down from. Reporting "the turn starts
+    // now" keeps turnStartedAt / turnEndsAt / turnTimeRemaining internally consistent and
+    // pinned at the full duration for every view built during the deal; `dealingComplete`
+    // is the flag a client should actually gate its timer UI on.
+    const dealing   = this.isDealingInProgress(state);
+    const turnBegan = dealing ? Date.now() : state.turnStartedAt;
+
     return {
       gameId:               state.gameId,
       mode:                 state.mode,
@@ -699,7 +814,10 @@ export class GameEngineService implements OnModuleInit {
       teamMelds,
       turnOrder:            state.turnOrder,
       currentTurnIndex:     state.currentTurnIndex,
-      turnStartedAt:        state.turnStartedAt,
+      turnStartedAt:        turnBegan,
+      // False while cards are still being dealt/animated at this table: no countdown, no
+      // AFK auto-play and no move is accepted until it flips true (see the deal gate).
+      dealingComplete:      !dealing,
       // The window the SERVER will actually act on — always the table's own configured
       // turn length now (see effectiveTurnSeconds); an absent player no longer shortens it.
       turnDuration:         effectiveTurnDuration,
@@ -711,7 +829,7 @@ export class GameEngineService implements OnModuleInit {
       // rather than a shortened one. Kept for client compatibility.
       turnFastAutoplay:     effectiveTurnDuration !== state.turnDuration,
       // Absolute deadline, so a client can drive its countdown without accumulating drift.
-      turnEndsAt:           state.turnStartedAt + effectiveTurnDuration * 1000,
+      turnEndsAt:           turnBegan + effectiveTurnDuration * 1000,
       round:                state.round,
       scores:               state.scores,
       moveCount:            state.moveCount,
@@ -737,7 +855,7 @@ export class GameEngineService implements OnModuleInit {
       forfeitAfterTurns:    FORFEIT_AFTER_AUTO_TURNS,
       turnTimeRemaining: Math.max(
         0,
-        effectiveTurnDuration - Math.floor((Date.now() - state.turnStartedAt) / 1000),
+        effectiveTurnDuration - Math.floor((Date.now() - turnBegan) / 1000),
       ),
     };
   }
@@ -750,6 +868,9 @@ export class GameEngineService implements OnModuleInit {
     const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
     if (!state) throw new NotFoundException('Game not found');
     if (state.status !== GameStatus.IN_PROGRESS) throw new BadRequestException('GAME_NOT_IN_PROGRESS');
+    // The deal is still being animated somewhere at this table — the turn clock has not
+    // started yet, so no move is accepted from anyone, the player to act included.
+    if (this.isDealingInProgress(state)) throw new BadRequestException(DEALING_IN_PROGRESS_MESSAGE);
 
     const currentPlayer = state.turnOrder[state.currentTurnIndex];
     if (currentPlayer !== playerId) throw new BadRequestException('NOT_YOUR_TURN');
@@ -1767,6 +1888,7 @@ export class GameEngineService implements OnModuleInit {
     const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
     if (!state) throw new NotFoundException('Game not found');
     if (state.status !== GameStatus.IN_PROGRESS) throw new BadRequestException('GAME_NOT_IN_PROGRESS');
+    if (this.isDealingInProgress(state)) throw new BadRequestException(DEALING_IN_PROGRESS_MESSAGE);
 
     const currentPlayer = state.turnOrder[state.currentTurnIndex];
     if (currentPlayer !== playerId) throw new BadRequestException('NOT_YOUR_TURN');
@@ -1852,6 +1974,9 @@ export class GameEngineService implements OnModuleInit {
     state.currentTurnIndex = 0;
     state.turnPhase   = 'MUST_DRAW';
     state.turnStartedAt = Date.now();
+    // A new round is a new deal: stop the clock again until every client has animated it,
+    // exactly as at match start. closeDealGateIfReady resets turnStartedAt when it opens.
+    this.openDealGate(state);
     state.toss        = null; // no toss animation for round ≥ 2
     // Neither miss counter is touched on a round transition. forfeitMissedTurns tracks a
     // player's cumulative AI-auto-played turns across the WHOLE match (it resets solely on
@@ -2519,6 +2644,10 @@ export class GameEngineService implements OnModuleInit {
     const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
     if (!state || state.status !== GameStatus.IN_PROGRESS) return;
     if (state.turnPhase === 'ROUND_ENDED') return;
+    // The cron already skips a table mid-deal; this is the same guard at the entry point,
+    // so no caller can auto-play a turn whose clock has not started (and bump that
+    // player's AFK counters for a turn they were never given).
+    if (this.isDealingInProgress(state)) return;
 
     const playerId = state.turnOrder[state.currentTurnIndex];
     const hand     = state.hands[playerId];
@@ -2752,7 +2881,21 @@ export class GameEngineService implements OnModuleInit {
     return { playerId, autoAction: drawnCard ? 'DRAW_THEN_DISCARD' : 'DISCARD', card: discardedCard };
   }
 
-  private pickLegalDiscardIndex(state: GameState, playerId: string, hand: Card[]): number {
+  /**
+   * Index of a card `playerId` may legally discard from `hand`, or -1 if there is none.
+   *
+   * `assumeTeamBuraco` lets a caller ask about a hand it has not created yet: the AI
+   * checks "may I meld this down to one card?" BEFORE laying the meld, and a 7-card
+   * lay-down completes the very Buraco that makes the last discard legal. Without it the
+   * AI would refuse the pot-unlocking meld on the strength of a Buraco it is holding in
+   * its hand.
+   */
+  private pickLegalDiscardIndex(
+    state: GameState,
+    playerId: string,
+    hand: Card[],
+    assumeTeamBuraco = false,
+  ): number {
     if (hand.length === 0) return -1;
 
     if (hand.length > 1) return Math.floor(Math.random() * hand.length);
@@ -2764,7 +2907,7 @@ export class GameEngineService implements OnModuleInit {
     const isClassic     = state.mode === GameMode.CLASSIC;
     const playerTeamId  = state.players.find(p => p.userId === playerId)?.teamId ?? 1;
     const teamPlayerIds = state.players.filter(p => p.teamId === playerTeamId).map(p => p.userId);
-    const teamHasBuraco = teamPlayerIds.some(uid => hasBuraco(state.melds[uid] || []));
+    const teamHasBuraco = assumeTeamBuraco || teamPlayerIds.some(uid => hasBuraco(state.melds[uid] || []));
     const teamPotCount  = (state.potCollectedByTeam ?? []).filter(id => id === playerTeamId).length;
 
     // Professional Direct: closing by discard is never allowed, full stop — the team must
@@ -2803,7 +2946,8 @@ export class GameEngineService implements OnModuleInit {
   /**
    * Applies the best available new melds and meld extensions from the player's hand,
    * emitting a separate game:state_updated per sub-move so the client can animate each
-   * step individually (spec §9 emission requirements).  Keeps ≥1 card for the discard.
+   * step individually (spec §9 emission requirements).  Never melds past the point where
+   * the turn can still end in a legal discard — see leavesLegalDiscard below.
    */
   private async aiApplyMeldsAndExtensions(state: GameState, gameId: string, playerId: string): Promise<void> {
     const hand    = state.hands[playerId];
@@ -2812,6 +2956,24 @@ export class GameEngineService implements OnModuleInit {
     const mode    = state.mode as string;
 
     const teamMelds = () => teamIds.flatMap(uid => state.melds[uid] || []);
+
+    /**
+     * True when the AI may reduce its hand to `remaining` and still end the turn with a
+     * legal discard.
+     *
+     * Melding down to a single card is only safe when discarding THAT card would itself
+     * be legal — it takes a pot, or it legally closes. In Professional with no Buraco
+     * neither is possible, so a turn that adds its second-to-last card to a meld ends in
+     * TIMEOUT_ADVANCE with no discard, and the same position then repeats every turn
+     * forever (the AFK stall). Human and offline play already refuse that move; the AI
+     * must too, and instead stop melding while it still holds two cards and discard.
+     *
+     * `meldReachesBuraco` is true when the meld under consideration will itself reach 7+
+     * cards: it completes the Buraco that unlocks the pot-take, which is what makes the
+     * final discard legal, so it has to count even though it is not on the board yet.
+     */
+    const leavesLegalDiscard = (remaining: Card[], meldReachesBuraco = false) =>
+      this.pickLegalDiscardIndex(state, playerId, remaining, meldReachesBuraco) !== -1;
 
     // Emit each meld/extension as its own state — but PACED (~one animation apart, see
     // paceAutoMove) so the client animates each smoothly and the burst doesn't bury the
@@ -2844,13 +3006,19 @@ export class GameEngineService implements OnModuleInit {
     if (openingPending) {
       // Mirror the loop below exactly — same skip condition, same shrinking hand — so the
       // decision is made on what will really be played, not an optimistic upper bound.
-      let simHandSize = hand.length;
-      let reachable   = 0;
+      // (Merge targets are read from the board as it stands now rather than as each
+      // simulated meld would leave it; the real loop re-reads them for every meld.)
+      let simHand   = [...hand];
+      let reachable = 0;
       for (const m of newMelds) {
-        if (simHandSize - m.length < 1) continue;
-        if (!validateMeld(m, mode).valid) continue;
-        simHandSize -= m.length;
-        reachable   += m.reduce((s, c) => s + cardValue(c, isPro), 0);
+        const v = validateMeld(m, mode);
+        if (!v.valid) continue;
+        const ids    = new Set(m.map(c => c.id));
+        const rest   = simHand.filter(c => !ids.has(c.id));
+        const target = tryFindMergeTarget(m, v.type!, teamMelds(), mode);
+        if (!leavesLegalDiscard(rest, (target?.cards.length ?? 0) + m.length >= 7)) continue;
+        simHand    = rest;
+        reachable += m.reduce((s, c) => s + cardValue(c, isPro), 0);
       }
       if (reachable < rule!.requirement) return; // no melds, no extensions — just discard
     }
@@ -2872,9 +3040,8 @@ export class GameEngineService implements OnModuleInit {
       }
     };
 
-    // 1 — Play new melds from hand (leave at least 1 card to discard).
+    // 1 — Play new melds from hand (only while the turn can still end in a legal discard).
     for (const meldCards of newMelds) {
-      if (hand.length - meldCards.length < 1) continue;
       const validation = validateMeld(meldCards, mode);
       if (!validation.valid) continue;
 
@@ -2882,6 +3049,11 @@ export class GameEngineService implements OnModuleInit {
       const allMelds    = teamMelds();
       const mergeTarget = tryFindMergeTarget(meldCards, type, allMelds, mode);
       const sorted      = sortMeldCards(meldCards, type);
+
+      // Would laying this down strand the AI with an undiscardable last card?
+      const meldIds   = new Set(meldCards.map(c => c.id));
+      const remaining = hand.filter(c => !meldIds.has(c.id));
+      if (!leavesLegalDiscard(remaining, (mergeTarget?.cards.length ?? 0) + meldCards.length >= 7)) continue;
 
       trackSeventyFive(meldCards);
       meldCards.forEach(c => { const i = hand.findIndex(x => x.id === c.id); if (i >= 0) hand.splice(i, 1); });
@@ -2914,7 +3086,7 @@ export class GameEngineService implements OnModuleInit {
       });
     }
 
-    // 2 — Extend existing team melds (keep ≥1 card).
+    // 2 — Extend existing team melds (only while the turn can still end in a legal discard).
     let improved = true;
     while (improved && hand.length > 1) {
       improved = false;
@@ -2922,6 +3094,9 @@ export class GameEngineService implements OnModuleInit {
         for (let i = 0; i < hand.length; i++) {
           if (hand.length <= 1) break;
           if (!canAddToMeld(meld, [hand[i]], mode)) continue;
+          // Same stranding guard as the lay-down loop: this is the exact add that used to
+          // take the AI from 2 cards to 1 and dead-end the turn.
+          if (!leavesLegalDiscard(hand.filter((_, j) => j !== i), meld.cards.length + 1 >= 7)) continue;
           trackSeventyFive([hand[i]]);
           const [card]   = hand.splice(i, 1);
           meld.cards     = sortMeldCards([...meld.cards, card], meld.type);
@@ -3076,8 +3251,12 @@ export class GameEngineService implements OnModuleInit {
   // ── Toss ───────────────────────────────────────────────────────────────────
 
   private runToss(playerIds: string[], seatMap: Record<string, number>): TossResult {
-    // Include jokers: Joker is the highest toss card (15 > Ace=14 > King=13 > … > 2=2)
-    let tossDeck = shuffle(generateDeck(true));
+    // NO jokers in the toss, in either mode — a Joker must never be the card a seat is
+    // shown during the opening draw. Classic's PLAY deck still has its jokers (dealt in
+    // startGame); this is the toss deck only, and Professional's deal deck already had
+    // none. Ranking is therefore Ace=14 > King=13 > … > 2=2 (tossRankValue's Joker=15
+    // branch is now unreachable from here).
+    let tossDeck = shuffle(generateDeck(false));
     const rounds: TossRound[] = [];
     let winnerPlayerId: string | null = null;
     let winnerSeatIndex = 0;
@@ -3088,7 +3267,7 @@ export class GameEngineService implements OnModuleInit {
       const entries: TossEntry[] = [];
 
       for (const pid of playerIds) {
-        if (tossDeck.length === 0) tossDeck = shuffle(generateDeck(true));
+        if (tossDeck.length === 0) tossDeck = shuffle(generateDeck(false));
         const card = tossDeck.pop()!;
         entries.push({ playerId: pid, seatIndex: seatMap[pid], card, rankValue: tossRankValue(card.rank) });
       }
