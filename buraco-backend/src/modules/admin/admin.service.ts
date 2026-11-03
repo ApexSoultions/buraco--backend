@@ -11,6 +11,7 @@ import * as bcrypt from 'bcryptjs';
 import { CurrencyType, NotificationType, SubscriptionStatus, TransactionType } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { SystemConfigService } from '../../common/system-config/system-config.service';
+import { SocketService } from '../../common/socket/socket.service';
 import { AdminLoginDto } from './dto/admin-login.dto';
 import { BanUserDto } from './dto/ban-user.dto';
 import { CreditUserDto } from './dto/credit-user.dto';
@@ -28,6 +29,7 @@ export class AdminService {
     private jwt: JwtService,
     private config: ConfigService,
     private sysConfig: SystemConfigService,
+    private socketService: SocketService,
   ) {}
 
   // ─── Auth ─────────────────────────────────────────────────────────────────
@@ -272,6 +274,13 @@ export class AdminService {
         body: dto.body,
         data: dto.data ?? {},
       })),
+    });
+
+    // One live event for everyone online instead of a per-user lookup; clients re-fetch
+    // GET /notifications/unread-count for the badge.
+    this.socketService.emitToAll('notification:new', {
+      notification: { type: NotificationType.BROADCAST, title: dto.title, body: dto.body, data: dto.data ?? {}, createdAt: new Date().toISOString() },
+      unreadCount: null,
     });
 
     await this.audit(adminId, 'BROADCAST', 'Notification', 'all', { title: dto.title, recipientCount: users.length });

@@ -1,11 +1,21 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { ClubRole, ClubType, MemberStatus } from '@prisma/client';
+import { ClubRole, ClubType, MemberStatus, NotificationType } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { CreateClubDto } from './dto/create-club.dto';
+
+const ROLE_LABEL: Record<ClubRole, string> = {
+  [ClubRole.LEADER]: 'leader',
+  [ClubRole.VICE_LEADER]: 'vice leader',
+  [ClubRole.MEMBER]: 'member',
+};
 
 @Injectable()
 export class ClubsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private notifications: NotificationsService,
+  ) {}
 
   async createClub(userId: string, dto: CreateClubDto) {
     const existing = await this.prisma.club.findUnique({ where: { name: dto.name } });
@@ -50,6 +60,10 @@ export class ClubsService {
       });
       await tx.club.update({ where: { id: clubId }, data: { memberCount: { increment: 1 } } });
     });
+
+    const username = await this.usernameOf(userId);
+    await this.notifications.notifySafely(await this.officerIds(clubId, userId), NotificationType.CLUB_UPDATE,
+      club.name, `${username} joined the club`, { clubId, event: 'MEMBER_JOINED', userId, username });
   }
 
   async requestToJoin(userId: string, clubId: string) {
@@ -57,6 +71,10 @@ export class ClubsService {
     if (existing) throw new ConflictException('Already a member or request pending');
 
     await this.prisma.clubMember.create({ data: { clubId, userId, role: ClubRole.MEMBER, status: MemberStatus.PENDING } });
+
+    const [club, username] = await Promise.all([this.clubName(clubId), this.usernameOf(userId)]);
+    await this.notifications.notifySafely(await this.officerIds(clubId), NotificationType.CLUB_UPDATE,
+      club, `${username} asked to join the club`, { clubId, event: 'JOIN_REQUEST', userId, username });
   }
 
   async respondToRequest(leaderId: string, clubId: string, memberId: string, accept: boolean) {
@@ -73,6 +91,12 @@ export class ClubsService {
     } else {
       await this.prisma.clubMember.delete({ where: { clubId_userId: { clubId, userId: memberId } } });
     }
+
+    const club = await this.clubName(clubId);
+    await this.notifications.notifySafely(memberId,
+      accept ? NotificationType.CLUB_REQUEST_ACCEPTED : NotificationType.CLUB_REQUEST_DECLINED,
+      club, accept ? `Your request to join ${club} was accepted` : `Your request to join ${club} was declined`,
+      { clubId });
   }
 
   async removeMember(leaderId: string, clubId: string, memberId: string) {
@@ -81,11 +105,20 @@ export class ClubsService {
       await tx.clubMember.delete({ where: { clubId_userId: { clubId, userId: memberId } } });
       await tx.club.update({ where: { id: clubId }, data: { memberCount: { decrement: 1 } } });
     });
+
+    const club = await this.clubName(clubId);
+    await this.notifications.notifySafely(memberId, NotificationType.CLUB_UPDATE,
+      club, `You were removed from ${club}`, { clubId, event: 'REMOVED' });
   }
 
   async assignRole(leaderId: string, clubId: string, memberId: string, role: ClubRole) {
     await this.requireRole(leaderId, clubId, [ClubRole.LEADER]);
-    return this.prisma.clubMember.update({ where: { clubId_userId: { clubId, userId: memberId } }, data: { role } });
+    const updated = await this.prisma.clubMember.update({ where: { clubId_userId: { clubId, userId: memberId } }, data: { role } });
+
+    const club = await this.clubName(clubId);
+    await this.notifications.notifySafely(memberId, NotificationType.CLUB_UPDATE,
+      club, `You are now ${ROLE_LABEL[role]} of ${club}`, { clubId, event: 'ROLE_CHANGED', role });
+    return updated;
   }
 
   async leaveClub(userId: string, clubId: string) {
@@ -97,6 +130,12 @@ export class ClubsService {
       await tx.clubMember.delete({ where: { clubId_userId: { clubId, userId } } });
       await tx.club.update({ where: { id: clubId }, data: { memberCount: { decrement: 1 } } });
     });
+
+    if (member.status === MemberStatus.ACTIVE) {
+      const [club, username] = await Promise.all([this.clubName(clubId), this.usernameOf(userId)]);
+      await this.notifications.notifySafely(await this.officerIds(clubId, userId), NotificationType.CLUB_UPDATE,
+        club, `${username} left the club`, { clubId, event: 'MEMBER_LEFT', userId, username });
+    }
   }
 
   async getClub(clubId: string, requestingUserId?: string) {
@@ -145,6 +184,25 @@ export class ClubsService {
       await this.prisma.club.update({ where: { id: clubId }, data: { level: { increment: 1 } } });
     }
     return club;
+  }
+
+  /** Active leader and vice leaders — the people who handle members — minus `exceptUserId`. */
+  private async officerIds(clubId: string, exceptUserId?: string): Promise<string[]> {
+    const officers = await this.prisma.clubMember.findMany({
+      where: { clubId, status: MemberStatus.ACTIVE, role: { in: [ClubRole.LEADER, ClubRole.VICE_LEADER] } },
+      select: { userId: true },
+    });
+    return officers.map((o) => o.userId).filter((id) => id !== exceptUserId);
+  }
+
+  private async clubName(clubId: string): Promise<string> {
+    const club = await this.prisma.club.findUnique({ where: { id: clubId }, select: { name: true } });
+    return club?.name ?? 'Your club';
+  }
+
+  private async usernameOf(userId: string): Promise<string> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { username: true } });
+    return user?.username ?? 'A player';
   }
 
   private async requireRole(userId: string, clubId: string, roles: ClubRole[]) {

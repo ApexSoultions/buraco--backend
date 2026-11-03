@@ -1,10 +1,14 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { FriendshipStatus } from '@prisma/client';
+import { FriendshipStatus, NotificationType } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 @Injectable()
 export class FriendsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private notifications: NotificationsService,
+  ) {}
 
   async sendRequest(senderId: string, receiverId: string) {
     if (senderId === receiverId) throw new BadRequestException('Cannot send friend request to yourself');
@@ -18,7 +22,25 @@ export class FriendsService {
     if (existing?.status === FriendshipStatus.ACCEPTED) throw new ConflictException('ALREADY_FRIENDS');
     if (existing?.status === FriendshipStatus.PENDING) throw new ConflictException('REQUEST_ALREADY_SENT');
 
-    return this.prisma.friendship.create({ data: { senderId, receiverId, status: FriendshipStatus.PENDING } });
+    const [sender, receiver] = await Promise.all([
+      this.prisma.user.findUnique({ where: { id: senderId }, select: { username: true, avatarUrl: true } }),
+      this.prisma.user.findUnique({ where: { id: receiverId }, select: { id: true } }),
+    ]);
+    if (!receiver) throw new NotFoundException('User not found');
+
+    // A declined request leaves its row behind; asking again reopens it instead of
+    // hitting the unique (sender, receiver) constraint.
+    const request = existing
+      ? await this.prisma.friendship.update({
+          where: { id: existing.id },
+          data: { senderId, receiverId, status: FriendshipStatus.PENDING },
+        })
+      : await this.prisma.friendship.create({ data: { senderId, receiverId, status: FriendshipStatus.PENDING } });
+
+    await this.notifications.notifySafely(receiverId, NotificationType.FRIEND_REQUEST, 'New friend request',
+      `${sender?.username ?? 'A player'} wants to be your friend`,
+      { requestId: request.id, fromUserId: senderId, fromUsername: sender?.username, fromAvatarUrl: sender?.avatarUrl ?? null });
+    return request;
   }
 
   async acceptRequest(userId: string, requestId: string) {
@@ -26,7 +48,12 @@ export class FriendsService {
     if (!request || request.receiverId !== userId) throw new NotFoundException('Friend request not found');
     if (request.status !== FriendshipStatus.PENDING) throw new BadRequestException('Request is not pending');
 
-    return this.prisma.friendship.update({ where: { id: requestId }, data: { status: FriendshipStatus.ACCEPTED } });
+    const accepted = await this.prisma.friendship.update({ where: { id: requestId }, data: { status: FriendshipStatus.ACCEPTED } });
+    const me = await this.prisma.user.findUnique({ where: { id: userId }, select: { username: true, avatarUrl: true } });
+    await this.notifications.notifySafely(request.senderId, NotificationType.FRIEND_ACCEPTED, 'Friend request accepted',
+      `${me?.username ?? 'A player'} accepted your friend request`,
+      { friendshipId: requestId, userId, username: me?.username, avatarUrl: me?.avatarUrl ?? null });
+    return accepted;
   }
 
   async declineRequest(userId: string, requestId: string) {

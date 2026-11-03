@@ -664,14 +664,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     }
   }
 
-  // ─── Notification helpers ─────────────────────────────────────────────────
-
-  async sendNotificationToUser(userId: string, notification: any) {
-    const socketId = this.userSockets.get(userId);
-    if (socketId) {
-      this.server.to(socketId).emit('notification:new', notification);
-    }
-  }
+  // Notifications are delivered by NotificationsService through the `user:<id>` rooms.
 
   isUserOnline(userId: string): boolean {
     return this.userSockets.has(userId);

@@ -24,6 +24,11 @@ export class SocketService {
     this.server.to(userIds.map(userRoom)).emit(event, data);
   }
 
+  /** Emit to every connected socket (admin broadcasts). */
+  emitToAll(event: string, data: unknown) {
+    this.server?.emit(event, data);
+  }
+
   async emitPerPlayer(room: string, event: string, dataFn: (userId: string) => Promise<unknown>) {
     if (!this.server) return;
     const sockets = await this.server.in(room).fetchSockets();
