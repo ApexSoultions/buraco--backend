@@ -4,4 +4,3 @@ Barasillian-Cards-Game
 # Private keys — never commit
 *.pem
 *.key
-config.bat
