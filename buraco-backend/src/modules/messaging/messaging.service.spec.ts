@@ -32,8 +32,11 @@ function setup(opts: { members?: string[] | null; type?: 'DIRECT' | 'CLUB'; bloc
   };
   const friends = { isBlocked: jest.fn(async () => !!opts.blocked) };
   const socket = { emitToUsers: jest.fn() } as unknown as SocketService & { emitToUsers: jest.Mock };
-  const service = new MessagingService(prisma as any, friends as any, socket);
-  return { service, prisma, friends, socket };
+  const s3 = {
+    signUrls: jest.fn(async (keys: string[]) => new Map(keys.map((k) => [k, `https://signed.example/${k}?sig=1`]))),
+  };
+  const service = new MessagingService(prisma as any, friends as any, socket, s3 as any);
+  return { service, prisma, friends, socket, s3 };
 }
 
 describe('MessagingService — live delivery', () => {
@@ -45,11 +48,13 @@ describe('MessagingService — live delivery', () => {
     expect(socket.emitToUsers).toHaveBeenCalledWith([ALICE, BOB], 'chat:message', msg);
   });
 
-  it('delivers a voice message to every member', async () => {
-    const { service, socket } = setup();
+  it('delivers a voice message to every member with a signed link, storing only the key', async () => {
+    const { service, socket, prisma } = setup();
     const msg = await service.sendVoiceMessage(CONV, ALICE, 'voice-messages/x.m4a', 4, [ALICE, BOB]);
 
+    expect(prisma.message.create.mock.calls[0][0].data.voiceUrl).toBe('voice-messages/x.m4a');
     expect(msg.type).toBe('VOICE');
+    expect(msg.voiceUrl).toBe('https://signed.example/voice-messages/x.m4a?sig=1');
     expect(socket.emitToUsers).toHaveBeenCalledWith([ALICE, BOB], 'chat:message', msg);
   });
 

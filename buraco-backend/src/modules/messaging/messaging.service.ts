@@ -1,5 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { S3Service } from '../../common/s3/s3.service';
 import { SocketService } from '../../common/socket/socket.service';
 import { FriendsService } from '../friends/friends.service';
 
@@ -14,6 +15,7 @@ export class MessagingService {
     private prisma: PrismaService,
     private friendsService: FriendsService,
     private socketService: SocketService,
+    private s3: S3Service,
   ) {}
 
   async getOrCreateDirectConversation(userId1: string, userId2: string) {
@@ -52,7 +54,8 @@ export class MessagingService {
       this.prisma.message.count({ where: { conversationId: conv.id, isRead: false, senderId: { not: userId } } }),
     ]);
 
-    return { id: conv.id, type: conv.type, participant: other, club: null, lastMessage, unreadCount };
+    const [signed] = await this.withVoiceLinks([lastMessage]);
+    return { id: conv.id, type: conv.type, participant: other, club: null, lastMessage: signed, unreadCount };
   }
 
   async getClubConversation(clubId: string) {
@@ -78,12 +81,14 @@ export class MessagingService {
       this.prisma.message.count({ where: { conversationId: c.id, isRead: false, senderId: { not: userId } } }),
     ));
 
+    const lastMessages = await this.withVoiceLinks(conversations.map((c) => c.messages[0] || null));
+
     return conversations.map((c, idx) => ({
       id: c.id,
       type: c.type,
       participant: c.type === 'DIRECT' ? c.members[0]?.user : null,
       club: c.club,
-      lastMessage: c.messages[0] || null,
+      lastMessage: lastMessages[idx],
       unreadCount: unreadCounts[idx],
     }));
   }
@@ -103,7 +108,8 @@ export class MessagingService {
       this.prisma.message.count({ where: { conversationId } }),
     ]);
 
-    return { data: data.reverse(), meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
+    const signed = await this.withVoiceLinks(data.reverse());
+    return { data: signed, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
   }
 
   /**
@@ -149,14 +155,27 @@ export class MessagingService {
     return message;
   }
 
-  /** `memberIds` comes from assertCanSend(), which the controller runs before uploading to S3. */
-  async sendVoiceMessage(conversationId: string, senderId: string, voiceUrl: string, duration: number, memberIds: string[]) {
-    const message = await this.prisma.message.create({
-      data: { conversationId, senderId, type: 'VOICE', voiceUrl, duration },
+  /**
+   * `voiceKey` is the private S3 object key (stored in `voiceUrl`); members only ever see a
+   * short-lived signed link to it. `memberIds` comes from assertCanSend(), which the
+   * controller runs before uploading.
+   */
+  async sendVoiceMessage(conversationId: string, senderId: string, voiceKey: string, duration: number, memberIds: string[]) {
+    const created = await this.prisma.message.create({
+      data: { conversationId, senderId, type: 'VOICE', voiceUrl: voiceKey, duration },
       include: { sender: { select: SENDER_SELECT } },
     });
+    const [message] = await this.withVoiceLinks([created]);
     this.deliver(memberIds, message);
     return message;
+  }
+
+  /** Swap each stored voice key for a temporary signed download link. */
+  async withVoiceLinks<T extends { voiceUrl?: string | null } | null>(messages: T[]): Promise<T[]> {
+    const keys = messages.map((m) => m?.voiceUrl).filter((v): v is string => !!v);
+    if (keys.length === 0) return messages;
+    const links = await this.s3.signUrls(keys);
+    return messages.map((m) => (m?.voiceUrl ? { ...m, voiceUrl: links.get(m.voiceUrl) ?? m.voiceUrl } : m));
   }
 
   async markAsRead(conversationId: string, userId: string) {

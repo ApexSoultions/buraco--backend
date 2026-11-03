@@ -886,7 +886,9 @@ update.
 }
 ```
 For a voice message `type` is `"VOICE"`, `content` is `null`, and `voiceUrl` / `duration`
-(whole seconds) are set.
+(whole seconds) are set. `voiceUrl` is a signed S3 link that expires after 1 hour — the
+audio files are private. If playback fails with 403 later, re-fetch the conversation
+history to get fresh links.
 
 #### `chat:typing`
 Typing indicator from another member.

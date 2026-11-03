@@ -75,7 +75,7 @@ export class MessagingController {
       },
     },
   })
-  @ApiResponse({ status: 201, description: 'Voice message sent; also emitted on chat:message WS event' })
+  @ApiResponse({ status: 201, description: 'Voice message sent; also emitted on chat:message WS event. voiceUrl is a signed link valid for 1 hour.' })
   @ApiResponse({ status: 400, description: 'Missing file, unsupported audio format, or invalid duration' })
   @ApiResponse({ status: 403, description: 'Not a member of this conversation, or USER_BLOCKED' })
   @ApiResponse({ status: 404, description: 'Conversation not found' })
@@ -106,10 +106,11 @@ export class MessagingController {
 
     const ext = (file.originalname.split('.').pop() ?? 'audio').toLowerCase().replace(/[^a-z0-9]/g, '') || 'audio';
     const key = `voice-messages/${conversationId}/${uuidv4()}.${ext}`;
-    const voiceUrl = await this.s3.upload(key, file.buffer, file.mimetype);
+    // Private object: members get a short-lived signed link, never a permanent public URL.
+    await this.s3.uploadPrivate(key, file.buffer, file.mimetype);
 
     // Saves the message and delivers chat:message to every member over WebSocket.
-    return this.messagingService.sendVoiceMessage(conversationId, userId, voiceUrl, duration, memberIds);
+    return this.messagingService.sendVoiceMessage(conversationId, userId, key, duration, memberIds);
   }
 
   @Put('conversations/:conversationId/read')
