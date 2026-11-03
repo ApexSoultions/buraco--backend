@@ -1,6 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { Server } from 'socket.io';
 
+/** Personal room every authenticated socket joins on connect. */
+export function userRoom(userId: string): string {
+  return `user:${userId}`;
+}
+
 @Injectable()
 export class SocketService {
   private server: Server;
@@ -11,6 +16,12 @@ export class SocketService {
 
   emitToRoom(room: string, event: string, data: unknown) {
     this.server?.to(room).emit(event, data);
+  }
+
+  /** Emit to each user's personal `user:<id>` room — reaches them wherever they are in the app. */
+  emitToUsers(userIds: string[], event: string, data: unknown) {
+    if (!this.server || userIds.length === 0) return;
+    this.server.to(userIds.map(userRoom)).emit(event, data);
   }
 
   async emitPerPlayer(room: string, event: string, dataFn: (userId: string) => Promise<unknown>) {

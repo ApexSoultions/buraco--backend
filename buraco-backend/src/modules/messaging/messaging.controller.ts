@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Param, Post, Put, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Param, ParseUUIDPipe, Post, Put, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import {
   ApiBearerAuth, ApiBody, ApiConsumes, ApiOperation,
@@ -8,8 +8,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { S3Service } from '../../common/s3/s3.service';
-import { SocketService } from '../../common/socket/socket.service';
-import { MessagingService } from './messaging.service';
+import { MAX_VOICE_SECONDS, MessagingService } from './messaging.service';
 
 const ALLOWED_AUDIO_TYPES = ['audio/mpeg', 'audio/mp4', 'audio/webm', 'audio/ogg', 'audio/wav', 'audio/aac', 'audio/x-m4a'];
 
@@ -21,8 +20,21 @@ export class MessagingController {
   constructor(
     private readonly messagingService: MessagingService,
     private readonly s3: S3Service,
-    private readonly socketService: SocketService,
   ) {}
+
+  @Post('direct/:userId')
+  @ApiOperation({ summary: 'Open the 1-to-1 chat with a player (creates it the first time, reuses it after)' })
+  @ApiParam({ name: 'userId', description: "The other player's user UUID" })
+  @ApiResponse({ status: 201, description: 'Conversation in the same shape as GET /conversations rows' })
+  @ApiResponse({ status: 400, description: 'Tried to chat with yourself' })
+  @ApiResponse({ status: 403, description: 'USER_BLOCKED — one of you has blocked the other' })
+  @ApiResponse({ status: 404, description: 'User not found' })
+  startDirect(
+    @CurrentUser('id') userId: string,
+    @Param('userId', new ParseUUIDPipe()) otherUserId: string,
+  ) {
+    return this.messagingService.startDirectConversation(userId, otherUserId);
+  }
 
   @Get('conversations')
   @ApiOperation({ summary: 'Get all conversations (direct + club) for current user' })
@@ -65,6 +77,8 @@ export class MessagingController {
   })
   @ApiResponse({ status: 201, description: 'Voice message sent; also emitted on chat:message WS event' })
   @ApiResponse({ status: 400, description: 'Missing file, unsupported audio format, or invalid duration' })
+  @ApiResponse({ status: 403, description: 'Not a member of this conversation, or USER_BLOCKED' })
+  @ApiResponse({ status: 404, description: 'Conversation not found' })
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 5 * 1024 * 1024 } }))
   async sendVoiceMessage(
     @Param('conversationId') conversationId: string,
@@ -77,21 +91,25 @@ export class MessagingController {
       throw new BadRequestException(`Unsupported audio format: ${file.mimetype}`);
     }
 
-    const duration = parseFloat(rawDuration);
-    if (!Number.isFinite(duration) || duration <= 0) {
+    const seconds = parseFloat(rawDuration);
+    if (!Number.isFinite(seconds) || seconds <= 0) {
       throw new BadRequestException('duration must be a positive number (seconds)');
     }
+    if (seconds > MAX_VOICE_SECONDS) {
+      throw new BadRequestException(`Voice messages can be at most ${MAX_VOICE_SECONDS} seconds`);
+    }
+    // Message.duration is an Int column — a fractional value like 3.4 would fail the insert.
+    const duration = Math.max(1, Math.round(seconds));
 
-    const ext = file.originalname.split('.').pop() ?? 'audio';
+    // Check membership before anything is uploaded, so strangers cannot fill the bucket.
+    const memberIds = await this.messagingService.assertCanSend(conversationId, userId);
+
+    const ext = (file.originalname.split('.').pop() ?? 'audio').toLowerCase().replace(/[^a-z0-9]/g, '') || 'audio';
     const key = `voice-messages/${conversationId}/${uuidv4()}.${ext}`;
     const voiceUrl = await this.s3.upload(key, file.buffer, file.mimetype);
 
-    const message = await this.messagingService.sendVoiceMessage(conversationId, userId, voiceUrl, duration);
-
-    // Broadcast to all conversation members connected over WebSocket
-    this.socketService.emitToRoom(`conv:${conversationId}`, 'chat:message', message);
-
-    return message;
+    // Saves the message and delivers chat:message to every member over WebSocket.
+    return this.messagingService.sendVoiceMessage(conversationId, userId, voiceUrl, duration, memberIds);
   }
 
   @Put('conversations/:conversationId/read')

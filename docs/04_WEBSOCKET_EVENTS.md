@@ -820,12 +820,26 @@ extra field need no changes at all.
 
 ## Chat Events
 
-**Namespace:** `/chat`
+**Namespace:** `/` (default — the same socket as game events)
+
+Every authenticated socket joins its own room `user:<userId>` on connect. Chat events are
+delivered there, so a player receives messages from every conversation they belong to,
+including ones created after they connected. Only members of a conversation can send,
+read, mark read or see typing in it; anything else gets an `error` event with
+`code: "CHAT_ERROR"`.
+
+To open a 1-to-1 chat, call REST `POST /v1/messaging/direct/{userId}` first. It returns the
+conversation (created the first time, reused after) with `id`, `type`, `participant`,
+`lastMessage` and `unreadCount` — the same shape as rows of `GET /v1/messaging/conversations`.
+
+Voice messages are sent over REST: `POST /v1/messaging/conversations/{id}/voice`
+(multipart: `file`, `duration` in seconds, max 120 s, max 5 MB). They arrive on
+`chat:message` with `type: "VOICE"`.
 
 ### CLIENT → SERVER
 
 #### `chat:send`
-Send a text message.
+Send a text message (1–1000 characters, trimmed).
 ```json
 {
   "conversationId": "conv-uuid",
@@ -855,65 +869,42 @@ Mark messages as read.
 ### SERVER → CLIENT
 
 #### `chat:message`
-New message received.
+New text or voice message, sent to every member — the sender too, so their other screens
+update.
 ```json
 {
-  "event": "chat:message",
-  "data": {
-    "messageId": "msg-uuid",
-    "conversationId": "conv-uuid",
-    "senderId": "uuid",
-    "senderUsername": "BestFriend",
-    "senderAvatarUrl": "...",
-    "type": "TEXT",
-    "content": "Good game!",
-    "createdAt": "2024-01-01T12:00:00.000Z"
-  }
+  "id": "msg-uuid",
+  "conversationId": "conv-uuid",
+  "senderId": "uuid",
+  "type": "TEXT",
+  "content": "Good game!",
+  "voiceUrl": null,
+  "duration": null,
+  "isRead": false,
+  "createdAt": "2026-11-03T12:00:00.000Z",
+  "sender": { "id": "uuid", "username": "BestFriend", "avatarUrl": null }
 }
 ```
-
-#### `chat:voice_message`
-New voice message received.
-```json
-{
-  "event": "chat:voice_message",
-  "data": {
-    "messageId": "msg-uuid",
-    "conversationId": "conv-uuid",
-    "senderId": "uuid",
-    "senderUsername": "BestFriend",
-    "type": "VOICE",
-    "voiceUrl": "https://cdn.buraco.game/voice/msg.mp3",
-    "duration": 8,
-    "createdAt": "2024-01-01T12:01:00.000Z"
-  }
-}
-```
+For a voice message `type` is `"VOICE"`, `content` is `null`, and `voiceUrl` / `duration`
+(whole seconds) are set.
 
 #### `chat:typing`
-Typing indicator from another user.
+Typing indicator from another member.
 ```json
 {
-  "event": "chat:typing",
-  "data": {
-    "conversationId": "conv-uuid",
-    "userId": "uuid",
-    "username": "BestFriend",
-    "isTyping": true
-  }
+  "conversationId": "conv-uuid",
+  "userId": "uuid",
+  "isTyping": true
 }
 ```
 
 #### `chat:read_receipt`
-Messages marked as read by recipient.
+Another member read the conversation.
 ```json
 {
-  "event": "chat:read_receipt",
-  "data": {
-    "conversationId": "conv-uuid",
-    "readByUserId": "uuid",
-    "readAt": "2024-01-01T12:02:00.000Z"
-  }
+  "conversationId": "conv-uuid",
+  "readByUserId": "uuid",
+  "readAt": "2026-11-03T12:02:00.000Z"
 }
 ```
 

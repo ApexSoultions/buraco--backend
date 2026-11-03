@@ -16,7 +16,7 @@ import { MessagingService } from '../modules/messaging/messaging.service';
 import { RedisService } from '../common/redis/redis.service';
 import { ReconnectionService } from '../modules/reconnection/reconnection.service';
 import { RoomsService } from '../modules/rooms/rooms.service';
-import { SocketService } from '../common/socket/socket.service';
+import { SocketService, userRoom } from '../common/socket/socket.service';
 import { GameStatus, MoveType, RoomStatus } from '@prisma/client';
 import { Logger } from '@nestjs/common';
 
@@ -72,6 +72,8 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
       }
 
       socket.data.userId = payload.sub;
+      // Personal room: chat messages, read receipts and notifications are sent here.
+      socket.join(userRoom(payload.sub));
       this.userSockets.set(payload.sub, socket.id);
       await this.redis.set(`online:${payload.sub}`, '1', 30);
       this.logger.log(`User ${payload.sub} connected: ${socket.id}`);
@@ -637,22 +639,29 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
   async handleChatSend(@ConnectedSocket() socket: Socket, @MessageBody() data: { conversationId: string; content: string }) {
     const userId = socket.data.userId;
     try {
-      const message = await this.messaging.sendMessage(data.conversationId, userId, data.content);
-      this.server.to(`conv:${data.conversationId}`).emit('chat:message', message);
+      // sendMessage delivers `chat:message` to every member's user room itself.
+      await this.messaging.sendMessage(data?.conversationId, userId, data?.content);
     } catch (err) {
       socket.emit('error', { code: 'CHAT_ERROR', message: (err as Error).message });
     }
   }
 
   @SubscribeMessage('chat:typing')
-  handleTyping(@ConnectedSocket() socket: Socket, @MessageBody() data: { conversationId: string; isTyping: boolean }) {
-    socket.to(`conv:${data.conversationId}`).emit('chat:typing', { conversationId: data.conversationId, userId: socket.data.userId, isTyping: data.isTyping });
+  async handleTyping(@ConnectedSocket() socket: Socket, @MessageBody() data: { conversationId: string; isTyping: boolean }) {
+    try {
+      await this.messaging.notifyTyping(data?.conversationId, socket.data.userId, data?.isTyping);
+    } catch {
+      // Typing indicators are best-effort; a non-member just gets nothing.
+    }
   }
 
   @SubscribeMessage('chat:read')
   async handleChatRead(@ConnectedSocket() socket: Socket, @MessageBody() data: { conversationId: string }) {
-    await this.messaging.markAsRead(data.conversationId, socket.data.userId);
-    socket.to(`conv:${data.conversationId}`).emit('chat:read_receipt', { conversationId: data.conversationId, readByUserId: socket.data.userId, readAt: new Date().toISOString() });
+    try {
+      await this.messaging.markAsRead(data?.conversationId, socket.data.userId);
+    } catch (err) {
+      socket.emit('error', { code: 'CHAT_ERROR', message: (err as Error).message });
+    }
   }
 
   // ─── Notification helpers ─────────────────────────────────────────────────

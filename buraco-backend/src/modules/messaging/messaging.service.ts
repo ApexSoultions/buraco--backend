@@ -1,12 +1,19 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { SocketService } from '../../common/socket/socket.service';
 import { FriendsService } from '../friends/friends.service';
+
+export const MAX_TEXT_LENGTH = 1000;
+export const MAX_VOICE_SECONDS = 120;
+
+const SENDER_SELECT = { id: true, username: true, avatarUrl: true } as const;
 
 @Injectable()
 export class MessagingService {
   constructor(
     private prisma: PrismaService,
     private friendsService: FriendsService,
+    private socketService: SocketService,
   ) {}
 
   async getOrCreateDirectConversation(userId1: string, userId2: string) {
@@ -30,6 +37,22 @@ export class MessagingService {
       });
       return conv;
     });
+  }
+
+  /** Open (or reuse) the 1-to-1 chat with another player, shaped like a getConversations() row. */
+  async startDirectConversation(userId: string, otherUserId: string) {
+    if (userId === otherUserId) throw new BadRequestException('Cannot start a chat with yourself');
+
+    const other = await this.prisma.user.findUnique({ where: { id: otherUserId }, select: SENDER_SELECT });
+    if (!other) throw new NotFoundException('User not found');
+
+    const conv = await this.getOrCreateDirectConversation(userId, otherUserId);
+    const [lastMessage, unreadCount] = await Promise.all([
+      this.prisma.message.findFirst({ where: { conversationId: conv.id }, orderBy: { createdAt: 'desc' } }),
+      this.prisma.message.count({ where: { conversationId: conv.id, isRead: false, senderId: { not: userId } } }),
+    ]);
+
+    return { id: conv.id, type: conv.type, participant: other, club: null, lastMessage, unreadCount };
   }
 
   async getClubConversation(clubId: string) {
@@ -66,10 +89,7 @@ export class MessagingService {
   }
 
   async getHistory(conversationId: string, userId: string, page = 1, limit = 50) {
-    const member = await this.prisma.conversationMember.findUnique({
-      where: { conversationId_userId: { conversationId, userId } },
-    });
-    if (!member) throw new ForbiddenException('Not a member of this conversation');
+    await this.assertMember(conversationId, userId);
 
     const skip = (page - 1) * limit;
     const [data, total] = await Promise.all([
@@ -86,24 +106,86 @@ export class MessagingService {
     return { data: data.reverse(), meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
   }
 
-  async sendMessage(conversationId: string, senderId: string, content: string) {
-    return this.prisma.message.create({
-      data: { conversationId, senderId, type: 'TEXT', content },
-      include: { sender: { select: { id: true, username: true, avatarUrl: true } } },
+  /**
+   * Member ids of a conversation, after checking `userId` is one of them.
+   * Throws 404 for an unknown conversation and 403 for a non-member.
+   */
+  async assertMember(conversationId: string, userId: string): Promise<string[]> {
+    const conv = await this.prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: { members: { select: { userId: true } } },
     });
+    if (!conv) throw new NotFoundException('Conversation not found');
+
+    const memberIds = conv.members.map((m) => m.userId);
+    if (!memberIds.includes(userId)) throw new ForbiddenException('Not a member of this conversation');
+    return memberIds;
   }
 
-  async sendVoiceMessage(conversationId: string, senderId: string, voiceUrl: string, duration: number) {
-    return this.prisma.message.create({
-      data: { conversationId, senderId, type: 'VOICE', voiceUrl, duration },
-      include: { sender: { select: { id: true, username: true, avatarUrl: true } } },
+  /** Membership check plus, for a 1-to-1 chat, refusing to deliver across a block. */
+  async assertCanSend(conversationId: string, senderId: string): Promise<string[]> {
+    const memberIds = await this.assertMember(conversationId, senderId);
+    const others = memberIds.filter((id) => id !== senderId);
+    if (others.length === 1) {
+      const conv = await this.prisma.conversation.findUnique({ where: { id: conversationId }, select: { type: true } });
+      if (conv?.type === 'DIRECT' && (await this.friendsService.isBlocked(senderId, others[0]))) {
+        throw new ForbiddenException('USER_BLOCKED');
+      }
+    }
+    return memberIds;
+  }
+
+  async sendMessage(conversationId: string, senderId: string, content: string) {
+    const text = typeof content === 'string' ? content.trim() : '';
+    if (!text) throw new BadRequestException('Message is empty');
+    if (text.length > MAX_TEXT_LENGTH) throw new BadRequestException(`Message is longer than ${MAX_TEXT_LENGTH} characters`);
+
+    const memberIds = await this.assertCanSend(conversationId, senderId);
+    const message = await this.prisma.message.create({
+      data: { conversationId, senderId, type: 'TEXT', content: text },
+      include: { sender: { select: SENDER_SELECT } },
     });
+    this.deliver(memberIds, message);
+    return message;
+  }
+
+  /** `memberIds` comes from assertCanSend(), which the controller runs before uploading to S3. */
+  async sendVoiceMessage(conversationId: string, senderId: string, voiceUrl: string, duration: number, memberIds: string[]) {
+    const message = await this.prisma.message.create({
+      data: { conversationId, senderId, type: 'VOICE', voiceUrl, duration },
+      include: { sender: { select: SENDER_SELECT } },
+    });
+    this.deliver(memberIds, message);
+    return message;
   }
 
   async markAsRead(conversationId: string, userId: string) {
-    return this.prisma.message.updateMany({
+    const memberIds = await this.assertMember(conversationId, userId);
+    const result = await this.prisma.message.updateMany({
       where: { conversationId, senderId: { not: userId }, isRead: false },
       data: { isRead: true },
     });
+    this.socketService.emitToUsers(memberIds.filter((id) => id !== userId), 'chat:read_receipt', {
+      conversationId,
+      readByUserId: userId,
+      readAt: new Date().toISOString(),
+    });
+    return result;
+  }
+
+  async notifyTyping(conversationId: string, userId: string, isTyping: boolean) {
+    const memberIds = await this.assertMember(conversationId, userId);
+    this.socketService.emitToUsers(memberIds.filter((id) => id !== userId), 'chat:typing', {
+      conversationId,
+      userId,
+      isTyping: !!isTyping,
+    });
+  }
+
+  // Every member — the sender too, so their other screens stay in step — gets the
+  // message through their personal `user:<id>` room, which each socket joins on connect.
+  // Unlike per-conversation rooms, this needs no re-joining when a chat is created later.
+  private deliver(memberIds: string[], message: unknown) {
+    this.socketService.emitToUsers(memberIds, 'chat:message', message);
   }
 }
