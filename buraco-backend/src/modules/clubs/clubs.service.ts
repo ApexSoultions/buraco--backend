@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { ClubRole, ClubType, MemberStatus, NotificationType } from '@prisma/client';
+import { ClubRole, ClubType, MemberStatus, MissionRequirement, NotificationType } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { MissionsService } from '../missions/missions.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CreateClubDto } from './dto/create-club.dto';
 
@@ -15,6 +16,7 @@ export class ClubsService {
   constructor(
     private prisma: PrismaService,
     private notifications: NotificationsService,
+    private missions: MissionsService,
   ) {}
 
   async createClub(userId: string, dto: CreateClubDto) {
@@ -24,7 +26,7 @@ export class ClubsService {
     const userClub = await this.prisma.clubMember.findFirst({ where: { userId, status: MemberStatus.ACTIVE } });
     if (userClub) throw new BadRequestException('ALREADY_IN_CLUB');
 
-    return this.prisma.$transaction(async (tx) => {
+    const created = await this.prisma.$transaction(async (tx) => {
       const club = await tx.club.create({
         data: { ...dto, memberCount: 1 },
       });
@@ -32,6 +34,8 @@ export class ClubsService {
       await tx.conversation.create({ data: { type: 'CLUB', clubId: club.id } });
       return club;
     });
+    await this.missions.updateProgressSafely(userId, MissionRequirement.JOIN_CLUB);
+    return created;
   }
 
   async updateClub(userId: string, clubId: string, dto: Partial<CreateClubDto>) {
@@ -61,6 +65,8 @@ export class ClubsService {
       await tx.club.update({ where: { id: clubId }, data: { memberCount: { increment: 1 } } });
     });
 
+    await this.missions.updateProgressSafely(userId, MissionRequirement.JOIN_CLUB);
+
     const username = await this.usernameOf(userId);
     await this.notifications.notifySafely(await this.officerIds(clubId, userId), NotificationType.CLUB_UPDATE,
       club.name, `${username} joined the club`, { clubId, event: 'MEMBER_JOINED', userId, username });
@@ -88,6 +94,7 @@ export class ClubsService {
         await tx.clubMember.update({ where: { clubId_userId: { clubId, userId: memberId } }, data: { status: MemberStatus.ACTIVE } });
         await tx.club.update({ where: { id: clubId }, data: { memberCount: { increment: 1 } } });
       });
+      await this.missions.updateProgressSafely(memberId, MissionRequirement.JOIN_CLUB);
     } else {
       await this.prisma.clubMember.delete({ where: { clubId_userId: { clubId, userId: memberId } } });
     }

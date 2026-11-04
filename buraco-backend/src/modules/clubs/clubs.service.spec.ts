@@ -34,9 +34,29 @@ function setup(opts: { member?: any; type?: ClubType } = {}) {
     $transaction: jest.fn(async (fn: any) => fn(tx)),
   };
   const notifications = { notifySafely: jest.fn(async () => undefined) };
-  const service = new ClubsService(prisma as any, notifications as any);
-  return { service, notifications };
+  const missions = { updateProgressSafely: jest.fn(async () => undefined) };
+  const service = new ClubsService(prisma as any, notifications as any, missions as any);
+  return { service, notifications, missions };
 }
+
+describe('ClubsService — Join a Club mission', () => {
+  it('counts joining an open club', async () => {
+    const { service, missions } = setup();
+    await service.joinClub(PLAYER, CLUB);
+    expect(missions.updateProgressSafely).toHaveBeenCalledWith(PLAYER, 'JOIN_CLUB');
+  });
+
+  it('counts an accepted request, not a declined one', async () => {
+    const pending = { userId: PLAYER, role: ClubRole.MEMBER, status: MemberStatus.PENDING };
+    const accepted = setup({ member: pending });
+    await accepted.service.respondToRequest(LEADER, CLUB, PLAYER, true);
+    expect(accepted.missions.updateProgressSafely).toHaveBeenCalledWith(PLAYER, 'JOIN_CLUB');
+
+    const declined = setup({ member: pending });
+    await declined.service.respondToRequest(LEADER, CLUB, PLAYER, false);
+    expect(declined.missions.updateProgressSafely).not.toHaveBeenCalled();
+  });
+});
 
 describe('ClubsService notifications', () => {
   it('tells the officers when someone joins an open club', async () => {

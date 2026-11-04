@@ -83,9 +83,32 @@ function buildService(overrides: { existingReport?: boolean; gameStatus?: GameSt
   const stats: any = { updateAfterMatch: jest.fn().mockResolvedValue(undefined) };
   const socket: any = { emitToRoom: jest.fn(), emitPerPlayer: jest.fn() };
 
-  const service = new GameEngineService(prisma, redis, economy, stats, socket);
-  return { service, prisma, redis, economy, stats, created };
+  const missions: any = { recordMatchSafely: jest.fn().mockResolvedValue(undefined) };
+
+  const service = new GameEngineService(prisma, redis, economy, stats, socket, missions);
+  return { service, prisma, redis, economy, stats, missions, created };
 }
+
+describe('GameEngineService — mission progress at settlement', () => {
+  it('records the match for every player once, with mode, result, points and streak', async () => {
+    const { service, stats, missions } = buildService();
+    stats.updateAfterMatch.mockImplementation(async (userId: string) => ({ winStreak: userId === P2 ? 2 : 0 }));
+
+    await service.reportMatchResult(GAME_ID, P1, reportBody());
+
+    expect(missions.recordMatchSafely).toHaveBeenCalledTimes(2);
+    expect(missions.recordMatchSafely).toHaveBeenCalledWith(P2, expect.objectContaining({ mode: 'CLASSIC', isWinner: true, winStreak: 2 }));
+    expect(missions.recordMatchSafely).toHaveBeenCalledWith(P1, expect.objectContaining({ mode: 'CLASSIC', isWinner: false, winStreak: 0 }));
+    const [, winner] = missions.recordMatchSafely.mock.calls.find((c: any[]) => c[0] === P2);
+    expect(winner.pointsEarned).toBeGreaterThan(0);
+  });
+
+  it('does not record anything for a match that was already settled', async () => {
+    const { service, missions } = buildService({ existingReport: true });
+    await service.reportMatchResult(GAME_ID, P1, reportBody()).catch(() => undefined);
+    expect(missions.recordMatchSafely).not.toHaveBeenCalled();
+  });
+});
 
 describe('GameEngineService.reportMatchResult', () => {
   it('persists the first report and settles economy, stats and the room', async () => {

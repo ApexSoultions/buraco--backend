@@ -947,6 +947,7 @@ has no `id` and `unreadCount` is `null` — re-fetch `GET /v1/notifications/unre
 | `CLUB_UPDATE` | leader + vice leaders | someone joined / asked to join / left | `clubId`, `event` (`MEMBER_JOINED`, `JOIN_REQUEST`, `MEMBER_LEFT`), `userId`, `username` |
 | `CLUB_UPDATE` | the player | removed from the club / role changed | `clubId`, `event` (`REMOVED`, `ROLE_CHANGED`), `role` |
 | `CLUB_REQUEST_ACCEPTED` / `CLUB_REQUEST_DECLINED` | the player | their join request was answered | `clubId` |
+| `REWARD` | the player | a daily/weekly mission was completed (claim with `POST /v1/missions/{missionId}/claim`) | `event: "MISSION_COMPLETED"`, `missionId`, `missionType`, `rewardCoins`, `rewardDiamonds` |
 | `BROADCAST` | everyone | admin broadcast | whatever the admin sent |
 
 ---

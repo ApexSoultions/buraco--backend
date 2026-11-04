@@ -35,8 +35,9 @@ function setup(opts: { members?: string[] | null; type?: 'DIRECT' | 'CLUB'; bloc
   const s3 = {
     signUrls: jest.fn(async (keys: string[]) => new Map(keys.map((k) => [k, `https://signed.example/${k}?sig=1`]))),
   };
-  const service = new MessagingService(prisma as any, friends as any, socket, s3 as any);
-  return { service, prisma, friends, socket, s3 };
+  const missions = { updateProgressSafely: jest.fn(async () => undefined) };
+  const service = new MessagingService(prisma as any, friends as any, socket, s3 as any, missions as any);
+  return { service, prisma, friends, socket, s3, missions };
 }
 
 describe('MessagingService — live delivery', () => {
@@ -139,6 +140,22 @@ describe('MessagingService — start a private chat', () => {
   it('refuses when either player has blocked the other', async () => {
     const { service } = setup({ blocked: true });
     await expect(service.startDirectConversation(ALICE, BOB)).rejects.toThrow('USER_BLOCKED');
+  });
+});
+
+describe('MessagingService — mission progress', () => {
+  it('counts each sent message towards the sender\'s chat missions', async () => {
+    const { service, missions } = setup();
+    await service.sendMessage(CONV, ALICE, 'hi');
+    await service.sendVoiceMessage(CONV, ALICE, 'voice-messages/x.m4a', 2, [ALICE, BOB]);
+    expect(missions.updateProgressSafely).toHaveBeenCalledTimes(2);
+    expect(missions.updateProgressSafely).toHaveBeenCalledWith(ALICE, 'SEND_MESSAGES');
+  });
+
+  it('does not count a refused message', async () => {
+    const { service, missions } = setup();
+    await expect(service.sendMessage(CONV, MALLORY, 'hi')).rejects.toBeDefined();
+    expect(missions.updateProgressSafely).not.toHaveBeenCalled();
   });
 });
 

@@ -40,6 +40,7 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { RedisService } from '../../common/redis/redis.service';
 import { EconomyService } from '../economy/economy.service';
 import { StatsService } from '../stats/stats.service';
+import { MissionsService } from '../missions/missions.service';
 import { generateDeck, shuffle, Card, tossRankValue, rankOrder, cardValue } from './buraco/deck';
 import {
   validateMeld,
@@ -258,6 +259,7 @@ export class GameEngineService implements OnModuleInit {
     private economyService: EconomyService,
     private statsService: StatsService,
     private socketService: SocketService,
+    private missionsService: MissionsService,
   ) {}
 
   /**
@@ -1639,12 +1641,11 @@ export class GameEngineService implements OnModuleInit {
 
     // On a draw nobody is credited a win; both sides take the non-winner payout, matching
     // how reportMatchResult already treats a neutral (winnerTeam 0) ending.
-    await Promise.all(players.map(async (p) => {
-      const isWinner = !isDraw && winnerIds.includes(p.userId);
-      const reward   = calculateMatchReward(scores[p.teamId] ?? 0, isWinner);
-      await this.statsService.updateAfterMatch(p.userId, isWinner ? 'WIN' : 'LOSS', reward.points, reward.xp);
-      await this.economyService.distributeMatchReward(p.userId, gameId, reward.coins);
-    }));
+    await this.payMatchRewards(gameId, args.mode, players.map(p => ({
+      userId:   p.userId,
+      isWinner: !isDraw && winnerIds.includes(p.userId),
+      score:    scores[p.teamId] ?? 0,
+    })));
 
     // The match is over: stop the cron from ever looking at it again.
     await this.redis.srem(this.activeGamesKey(), gameId);
@@ -1654,6 +1655,29 @@ export class GameEngineService implements OnModuleInit {
       `Match ${gameId} settled: reason=${reason} ${isDraw ? 'DRAW' : `winnerTeam=${winnerTeam}`}`,
     );
     return true;
+  }
+
+  /**
+   * Stats, coins and mission progress for every player of a settled match. Callers have
+   * already won the settle-once guard, so this runs exactly once per match.
+   */
+  private async payMatchRewards(
+    gameId: string,
+    mode: GameMode,
+    players: Array<{ userId: string; isWinner: boolean; score: number }>,
+  ) {
+    await Promise.all(players.map(async (p) => {
+      const reward = calculateMatchReward(p.score, p.isWinner);
+      const stats  = await this.statsService.updateAfterMatch(p.userId, p.isWinner ? 'WIN' : 'LOSS', reward.points, reward.xp);
+      await this.economyService.distributeMatchReward(p.userId, gameId, reward.coins);
+      // Never throws: a mission hiccup must not leave a settled match half-paid.
+      await this.missionsService.recordMatchSafely(p.userId, {
+        mode,
+        isWinner:     p.isWinner,
+        pointsEarned: reward.points,
+        winStreak:    stats?.winStreak ?? 0,
+      });
+    }));
   }
 
   async finalizeGame(gameId: string, state?: GameState, closerTeamId?: number, buracoOfTwos?: boolean) {
@@ -2309,12 +2333,11 @@ export class GameEngineService implements OnModuleInit {
 
       // Same reward curve the old server-side end-of-game flow used. On a neutral end
       // (winnerTeam 0) nobody is credited a win — both sides take the loser payout.
-      await Promise.all(game.players.map(async (p) => {
-        const isWinner = winnerIds.includes(p.userId);
-        const reward   = calculateMatchReward(Math.max(0, scoreByUser.get(p.userId) ?? 0), isWinner);
-        await this.statsService.updateAfterMatch(p.userId, isWinner ? 'WIN' : 'LOSS', reward.points, reward.xp);
-        await this.economyService.distributeMatchReward(p.userId, gameId, reward.coins);
-      }));
+      await this.payMatchRewards(gameId, game.mode, game.players.map(p => ({
+        userId:   p.userId,
+        isWinner: winnerIds.includes(p.userId),
+        score:    Math.max(0, scoreByUser.get(p.userId) ?? 0),
+      })));
     }
 
     // Retire the legacy parallel state: marking it COMPLETED both stops the turn-timeout

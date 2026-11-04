@@ -87,7 +87,7 @@ function buildService(state: GameState | null = gameState()) {
   const stats: any = { updateAfterMatch: jest.fn().mockResolvedValue(undefined) };
   const socket: any = { emitToRoom: jest.fn(), emitPerPlayer: jest.fn().mockResolvedValue(undefined) };
 
-  const service = new GameEngineService(prisma, redis, economy, stats, socket);
+  const service = new GameEngineService(prisma, redis, economy, stats, socket, { recordMatchSafely: jest.fn(async () => undefined) } as any);
   return { service, prisma, redis, economy, stats, socket, state };
 }
 

@@ -1,8 +1,10 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { MissionRequirement } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { S3Service } from '../../common/s3/s3.service';
 import { SocketService } from '../../common/socket/socket.service';
 import { FriendsService } from '../friends/friends.service';
+import { MissionsService } from '../missions/missions.service';
 
 export const MAX_TEXT_LENGTH = 1000;
 export const MAX_VOICE_SECONDS = 120;
@@ -16,6 +18,7 @@ export class MessagingService {
     private friendsService: FriendsService,
     private socketService: SocketService,
     private s3: S3Service,
+    private missions: MissionsService,
   ) {}
 
   async getOrCreateDirectConversation(userId1: string, userId2: string) {
@@ -152,6 +155,7 @@ export class MessagingService {
       include: { sender: { select: SENDER_SELECT } },
     });
     this.deliver(memberIds, message);
+    await this.missions.updateProgressSafely(senderId, MissionRequirement.SEND_MESSAGES);
     return message;
   }
 
@@ -167,6 +171,7 @@ export class MessagingService {
     });
     const [message] = await this.withVoiceLinks([created]);
     this.deliver(memberIds, message);
+    await this.missions.updateProgressSafely(senderId, MissionRequirement.SEND_MESSAGES);
     return message;
   }
 
