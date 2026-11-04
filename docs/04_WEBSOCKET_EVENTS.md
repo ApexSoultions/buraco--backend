@@ -916,32 +916,38 @@ Another member read the conversation.
 
 **Namespace:** `/` (default)
 
+Every notification is saved (REST `GET /v1/notifications`) and, if the player is online,
+also sent live to their `user:<userId>` room.
+
 ### SERVER → CLIENT
 
 #### `notification:new`
-Real-time notification delivery.
 ```json
 {
-  "event": "notification:new",
-  "data": {
+  "notification": {
     "id": "notif-uuid",
+    "userId": "uuid",
     "type": "FRIEND_REQUEST",
-    "title": "New Friend Request",
-    "body": "CoolPlayer sent you a friend request",
-    "data": { "requestId": "req-uuid" },
-    "createdAt": "2024-01-01T10:00:00.000Z"
-  }
+    "title": "New friend request",
+    "body": "CoolPlayer wants to be your friend",
+    "data": { "requestId": "req-uuid", "fromUserId": "uuid", "fromUsername": "CoolPlayer", "fromAvatarUrl": null },
+    "isRead": false,
+    "createdAt": "2026-11-04T10:00:00.000Z"
+  },
+  "unreadCount": 4
 }
 ```
+`unreadCount` is the player's new badge number. For an admin broadcast the notification
+has no `id` and `unreadCount` is `null` — re-fetch `GET /v1/notifications/unread-count`.
 
-#### `notification:unread_count`
-Unread count update after new notification.
-```json
-{
-  "event": "notification:unread_count",
-  "data": { "count": 4 }
-}
-```
+| type | Sent to | When | `data` |
+|---|---|---|---|
+| `FRIEND_REQUEST` | receiver | a friend request arrives | `requestId`, `fromUserId`, `fromUsername`, `fromAvatarUrl` |
+| `FRIEND_ACCEPTED` | original sender | their request was accepted | `friendshipId`, `userId`, `username`, `avatarUrl` |
+| `CLUB_UPDATE` | leader + vice leaders | someone joined / asked to join / left | `clubId`, `event` (`MEMBER_JOINED`, `JOIN_REQUEST`, `MEMBER_LEFT`), `userId`, `username` |
+| `CLUB_UPDATE` | the player | removed from the club / role changed | `clubId`, `event` (`REMOVED`, `ROLE_CHANGED`), `role` |
+| `CLUB_REQUEST_ACCEPTED` / `CLUB_REQUEST_DECLINED` | the player | their join request was answered | `clubId` |
+| `BROADCAST` | everyone | admin broadcast | whatever the admin sent |
 
 ---
 

@@ -21,9 +21,10 @@ export class NotificationsController {
     @CurrentUser('id') userId: string,
     @Query('page') page = 1,
     @Query('limit') limit = 20,
-    @Query('unreadOnly') unreadOnly = false,
+    @Query('unreadOnly') unreadOnly: string | boolean = false,
   ) {
-    return this.notificationsService.getNotifications(userId, +page, +limit, Boolean(unreadOnly));
+    // Query strings arrive as text: Boolean('false') would be true.
+    return this.notificationsService.getNotifications(userId, +page, +limit, unreadOnly === true || unreadOnly === 'true');
   }
 
   @Get('unread-count')
