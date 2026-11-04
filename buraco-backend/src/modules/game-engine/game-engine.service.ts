@@ -1671,7 +1671,7 @@ export class GameEngineService implements OnModuleInit {
   ) {
     await Promise.all(players.map(async (p) => {
       const reward = calculateMatchReward(p.score, p.isWinner);
-      const stats  = await this.statsService.updateAfterMatch(p.userId, p.isWinner ? 'WIN' : 'LOSS', reward.points, reward.xp);
+      const stats  = await this.statsService.updateAfterMatch(p.userId, p.isWinner ? 'WIN' : 'LOSS', reward.points, reward.xp, mode);
       await this.economyService.distributeMatchReward(p.userId, gameId, reward.coins);
       // Never throws: a mission hiccup must not leave a settled match half-paid.
       await this.missionsService.recordMatchSafely(p.userId, {

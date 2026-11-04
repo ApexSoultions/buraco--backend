@@ -235,6 +235,9 @@ model PlayerStats {
   userId        String   @unique
   user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   points        Int      @default(0)
+  /// Points earned in Classic-mode matches only: the Classic ranking's score.
+  /// (The International ranking ranks total wins across all modes.)
+  classicPoints Int      @default(0)
   level         Int      @default(1)
   experience    Int      @default(0)
   gamesPlayed   Int      @default(0)

@@ -142,8 +142,8 @@ describe('12 missed turns — who wins when nobody is playing', () => {
     expect(end.winnerIds).toEqual([P2]);
     expect(end.isDraw).toBe(false);
     expect(end.reason).toBe('player_abandoned');
-    expect(stats.updateAfterMatch).toHaveBeenCalledWith(P2, 'WIN', expect.any(Number), expect.any(Number));
-    expect(stats.updateAfterMatch).toHaveBeenCalledWith(P1, 'LOSS', expect.any(Number), expect.any(Number));
+    expect(stats.updateAfterMatch).toHaveBeenCalledWith(P2, 'WIN', expect.any(Number), expect.any(Number), 'CLASSIC');
+    expect(stats.updateAfterMatch).toHaveBeenCalledWith(P1, 'LOSS', expect.any(Number), expect.any(Number), 'CLASSIC');
   });
 
   it('draws when both players closed their phones', async () => {
@@ -169,8 +169,8 @@ describe('12 missed turns — who wins when nobody is playing', () => {
     expect(end.players.every((p: any) => p.result === 'DRAW')).toBe(true);
 
     // Nobody is credited a win, and the winnerTeam columns stay null.
-    expect(stats.updateAfterMatch).toHaveBeenCalledWith(P1, 'LOSS', expect.any(Number), expect.any(Number));
-    expect(stats.updateAfterMatch).toHaveBeenCalledWith(P2, 'LOSS', expect.any(Number), expect.any(Number));
+    expect(stats.updateAfterMatch).toHaveBeenCalledWith(P1, 'LOSS', expect.any(Number), expect.any(Number), 'CLASSIC');
+    expect(stats.updateAfterMatch).toHaveBeenCalledWith(P2, 'LOSS', expect.any(Number), expect.any(Number), 'CLASSIC');
     expect(prisma.matchRecord.create.mock.calls[0][0].data.winnerTeam).toBeNull();
   });
 

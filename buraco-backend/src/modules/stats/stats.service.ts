@@ -1,6 +1,18 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { GameMode } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { RedisService } from '../../common/redis/redis.service';
+
+/**
+ * Redis sorted sets behind the leaderboards:
+ * - classic: points earned in Classic-mode matches (PlayerStats.classicPoints)
+ * - international: wins across all modes (PlayerStats.wins)
+ */
+export const RANKING_KEYS = {
+  classic: 'ranking:classic',
+  international: 'ranking:international',
+} as const;
+export type RankingType = keyof typeof RANKING_KEYS;
 
 @Injectable()
 export class StatsService {
@@ -17,7 +29,11 @@ export class StatsService {
     return { ...stats, experienceToNextLevel: xpToNext - stats.experience };
   }
 
-  async updateAfterMatch(userId: string, result: 'WIN' | 'LOSS' | 'ABANDONED', pointsEarned: number, xpEarned: number) {
+  /**
+   * `mode` decides which ranking the points count for: CLASSIC adds to classicPoints (the
+   * Classic ranking); every match counts for the International ranking through `wins`.
+   */
+  async updateAfterMatch(userId: string, result: 'WIN' | 'LOSS' | 'ABANDONED', pointsEarned: number, xpEarned: number, mode?: GameMode) {
     const stats = await this.prisma.playerStats.findUnique({ where: { userId } });
     if (!stats) return;
 
@@ -46,15 +62,13 @@ export class StatsService {
         bestWinStreak: newBestStreak,
         experience: newXP,
         points: newPoints,
+        ...(mode === GameMode.CLASSIC && pointsEarned > 0 && { classicPoints: { increment: pointsEarned } }),
         level: newLevel,
         winPercentage: Math.round(newWinPct * 100) / 100,
       },
     });
 
-    // Update Redis ranking sorted sets
-    await this.redis.zadd('ranking:classic', newPoints, userId);
-    await this.redis.zadd('ranking:international', newPoints, userId);
-
+    await this.syncRankings(updated);
     return updated;
   }
 
@@ -63,9 +77,17 @@ export class StatsService {
       where: { userId },
       data: { points: { increment: points } },
     });
-    await this.redis.zadd('ranking:classic', stats.points, userId);
-    await this.redis.zadd('ranking:international', stats.points, userId);
+    await this.syncRankings(stats);
     return stats;
+  }
+
+  /**
+   * Write a player's scores into both ranking sets. They used to receive the same total
+   * points, which made the two leaderboards identical.
+   */
+  async syncRankings(stats: { userId: string; classicPoints: number; wins: number }) {
+    await this.redis.zadd(RANKING_KEYS.classic, stats.classicPoints, stats.userId);
+    await this.redis.zadd(RANKING_KEYS.international, stats.wins, stats.userId);
   }
 
   calculateLevel(xp: number): number {

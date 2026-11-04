@@ -137,8 +137,8 @@ describe('GameEngineService.reportMatchResult', () => {
     expect(prisma.gameSession.update).toHaveBeenCalledTimes(1);
     expect(prisma.matchRecord.create).toHaveBeenCalledTimes(1);
     expect(economy.distributeMatchReward).toHaveBeenCalledTimes(2);
-    expect(stats.updateAfterMatch).toHaveBeenCalledWith(P2, 'WIN', expect.any(Number), expect.any(Number));
-    expect(stats.updateAfterMatch).toHaveBeenCalledWith(P1, 'LOSS', expect.any(Number), expect.any(Number));
+    expect(stats.updateAfterMatch).toHaveBeenCalledWith(P2, 'WIN', expect.any(Number), expect.any(Number), 'CLASSIC');
+    expect(stats.updateAfterMatch).toHaveBeenCalledWith(P1, 'LOSS', expect.any(Number), expect.any(Number), 'CLASSIC');
 
     // Room released back to the lobby.
     expect(prisma.room.update).toHaveBeenCalledWith(

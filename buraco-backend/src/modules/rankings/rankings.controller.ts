@@ -12,7 +12,7 @@ export class RankingsController {
   constructor(private readonly rankingsService: RankingsService) {}
 
   @Get('classic')
-  @ApiOperation({ summary: 'Get Classic mode leaderboard (ordered by points)' })
+  @ApiOperation({ summary: 'Get Classic mode leaderboard (ordered by points earned in Classic matches)' })
   @ApiQuery({ name: 'page',  required: false, type: Number, description: 'Page number (default 1)' })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Players per page (default 50)' })
   @ApiResponse({ status: 200, description: 'Ranked player list with current user rank included' })
@@ -43,7 +43,7 @@ export class RankingsController {
   @ApiQuery({ name: 'type', required: false, enum: ['classic', 'international'], description: 'Ranking type (default: classic)' })
   @ApiResponse({ status: 200, description: 'Player rank detail' })
   @ApiResponse({ status: 404, description: 'Player not found' })
-  getPlayerRank(@Param('userId') userId: string, @Query('type') type: 'classic' | 'international' = 'classic') {
+  getPlayerRank(@Param('userId') userId: string, @Query('type') type: string = 'classic') {
     return this.rankingsService.getPlayerRank(userId, type);
   }
 }

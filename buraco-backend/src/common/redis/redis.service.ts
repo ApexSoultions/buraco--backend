@@ -80,6 +80,14 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     return this.client.zcard(key);
   }
 
+  /** Members ranked highest-first between positions `start` and `stop` (inclusive), with scores. */
+  async zrevrangeWithScores(key: string, start: number, stop: number): Promise<Array<{ member: string; score: number }>> {
+    const flat = await this.client.zrevrange(key, start, stop, 'WITHSCORES');
+    const out: Array<{ member: string; score: number }> = [];
+    for (let i = 0; i < flat.length; i += 2) out.push({ member: flat[i], score: Number(flat[i + 1]) });
+    return out;
+  }
+
   zscore(key: string, member: string) {
     return this.client.zscore(key, member);
   }
