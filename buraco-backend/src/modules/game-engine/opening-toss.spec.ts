@@ -13,7 +13,7 @@ const SEATS = { 'p-1': 0, 'p-2': 1, 'p-3': 2, 'p-4': 3 };
 function buildService() {
   const noop: any = {};
   const socket: any = { emitToRoom: jest.fn(), emitPerPlayer: jest.fn().mockResolvedValue(undefined) };
-  return new GameEngineService(noop, noop, noop, noop, socket, noop);
+  return new GameEngineService(noop, noop, noop, noop, socket, noop, noop);
 }
 
 /** runToss is private; the toss has no public entry point of its own. */

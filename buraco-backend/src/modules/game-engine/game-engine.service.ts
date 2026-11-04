@@ -41,6 +41,7 @@ import { RedisService } from '../../common/redis/redis.service';
 import { EconomyService } from '../economy/economy.service';
 import { StatsService } from '../stats/stats.service';
 import { MissionsService } from '../missions/missions.service';
+import { ClubsService } from '../clubs/clubs.service';
 import { generateDeck, shuffle, Card, tossRankValue, rankOrder, cardValue } from './buraco/deck';
 import {
   validateMeld,
@@ -260,6 +261,7 @@ export class GameEngineService implements OnModuleInit {
     private statsService: StatsService,
     private socketService: SocketService,
     private missionsService: MissionsService,
+    private clubsService: ClubsService,
   ) {}
 
   /**
@@ -1658,8 +1660,9 @@ export class GameEngineService implements OnModuleInit {
   }
 
   /**
-   * Stats, coins and mission progress for every player of a settled match. Callers have
-   * already won the settle-once guard, so this runs exactly once per match.
+   * Stats, coins, mission progress and club points for every player of a settled match.
+   * Callers have already won the settle-once guard, so this runs exactly once per match.
+   * Club points: the ranking points each player earned also go to their club.
    */
   private async payMatchRewards(
     gameId: string,
@@ -1677,6 +1680,7 @@ export class GameEngineService implements OnModuleInit {
         pointsEarned: reward.points,
         winStreak:    stats?.winStreak ?? 0,
       });
+      await this.clubsService.awardMatchPointsSafely(p.userId, reward.points);
     }));
   }
 

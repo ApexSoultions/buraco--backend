@@ -9,7 +9,7 @@ const USER = 'a1111111-1111-4111-8111-111111111111';
 
 type Row = { id: string; currentValue: number; isCompleted: boolean; isClaimed: boolean; mission: any };
 
-function mission(id: string, requirement: MissionRequirement, targetValue: number, type = MissionType.DAILY) {
+function mission(id: string, requirement: MissionRequirement, targetValue: number, type: MissionType = MissionType.DAILY) {
   return { id, title: `Mission ${id}`, type, requirement, targetValue, rewardCoins: 100, rewardDiamonds: 0, isActive: true };
 }
 

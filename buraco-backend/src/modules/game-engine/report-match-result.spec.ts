@@ -84,9 +84,10 @@ function buildService(overrides: { existingReport?: boolean; gameStatus?: GameSt
   const socket: any = { emitToRoom: jest.fn(), emitPerPlayer: jest.fn() };
 
   const missions: any = { recordMatchSafely: jest.fn().mockResolvedValue(undefined) };
+  const clubs: any = { awardMatchPointsSafely: jest.fn().mockResolvedValue(undefined) };
 
-  const service = new GameEngineService(prisma, redis, economy, stats, socket, missions);
-  return { service, prisma, redis, economy, stats, missions, created };
+  const service = new GameEngineService(prisma, redis, economy, stats, socket, missions, clubs);
+  return { service, prisma, redis, economy, stats, missions, clubs, created };
 }
 
 describe('GameEngineService — mission progress at settlement', () => {
@@ -101,6 +102,16 @@ describe('GameEngineService — mission progress at settlement', () => {
     expect(missions.recordMatchSafely).toHaveBeenCalledWith(P1, expect.objectContaining({ mode: 'CLASSIC', isWinner: false, winStreak: 0 }));
     const [, winner] = missions.recordMatchSafely.mock.calls.find((c: any[]) => c[0] === P2);
     expect(winner.pointsEarned).toBeGreaterThan(0);
+  });
+
+  it('gives each player\'s club the points that player earned', async () => {
+    const { service, missions, clubs } = buildService();
+    await service.reportMatchResult(GAME_ID, P1, reportBody());
+
+    expect(clubs.awardMatchPointsSafely).toHaveBeenCalledTimes(2);
+    for (const [userId, match] of missions.recordMatchSafely.mock.calls) {
+      expect(clubs.awardMatchPointsSafely).toHaveBeenCalledWith(userId, match.pointsEarned);
+    }
   });
 
   it('does not record anything for a match that was already settled', async () => {

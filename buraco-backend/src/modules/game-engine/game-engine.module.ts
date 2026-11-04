@@ -4,9 +4,10 @@ import { GameEngineService } from './game-engine.service';
 import { EconomyModule } from '../economy/economy.module';
 import { StatsModule } from '../stats/stats.module';
 import { MissionsModule } from '../missions/missions.module';
+import { ClubsModule } from '../clubs/clubs.module';
 
 @Module({
-  imports: [EconomyModule, StatsModule, MissionsModule],
+  imports: [EconomyModule, StatsModule, MissionsModule, ClubsModule],
   controllers: [GameEngineController],
   providers: [GameEngineService],
   exports: [GameEngineService],

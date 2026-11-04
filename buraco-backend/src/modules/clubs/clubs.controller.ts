@@ -1,10 +1,11 @@
-import { Body, Controller, Delete, Get, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseEnumPipe, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiBody, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { ClubMode, ClubRole, ClubType } from '@prisma/client';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ClubsService } from './clubs.service';
 import { CreateClubDto } from './dto/create-club.dto';
+import { UpdateClubDto } from './dto/update-club.dto';
 
 @ApiTags('Clubs')
 @ApiBearerAuth()
@@ -34,7 +35,7 @@ export class ClubsController {
   @Get(':clubId')
   @ApiOperation({ summary: 'Get full club detail including members' })
   @ApiParam({ name: 'clubId', description: 'Club UUID' })
-  @ApiResponse({ status: 200, description: 'Club detail with members and pending requests' })
+  @ApiResponse({ status: 200, description: 'Club detail with members, level progress, and pending requests (leader and vice leaders only)' })
   @ApiResponse({ status: 404, description: 'Club not found' })
   getClub(@Param('clubId') clubId: string, @CurrentUser('id') userId: string) {
     return this.clubsService.getClub(clubId, userId);
@@ -54,7 +55,7 @@ export class ClubsController {
   @ApiResponse({ status: 200, description: 'Club settings updated' })
   @ApiResponse({ status: 403, description: 'Only the Leader can update club settings' })
   @ApiResponse({ status: 404, description: 'Club not found' })
-  updateClub(@CurrentUser('id') userId: string, @Param('clubId') clubId: string, @Body() dto: Partial<CreateClubDto>) {
+  updateClub(@CurrentUser('id') userId: string, @Param('clubId') clubId: string, @Body() dto: UpdateClubDto) {
     return this.clubsService.updateClub(userId, clubId, dto);
   }
 
@@ -124,13 +125,13 @@ export class ClubsController {
   @ApiParam({ name: 'clubId', description: 'Club UUID' })
   @ApiParam({ name: 'userId', description: 'Target member UUID' })
   @ApiBody({ schema: { type: 'object', properties: { role: { type: 'string', enum: Object.values(ClubRole) } }, required: ['role'] } })
-  @ApiResponse({ status: 200, description: 'Role updated' })
+  @ApiResponse({ status: 200, description: 'Role updated. Assigning LEADER hands leadership over; the old leader becomes VICE_LEADER.' })
   @ApiResponse({ status: 403, description: 'Only the Leader can assign roles' })
   assignRole(
     @CurrentUser('id') leaderId: string,
     @Param('clubId') clubId: string,
     @Param('userId') memberId: string,
-    @Body('role') role: ClubRole,
+    @Body('role', new ParseEnumPipe(ClubRole)) role: ClubRole,
   ) {
     return this.clubsService.assignRole(leaderId, clubId, memberId, role);
   }
