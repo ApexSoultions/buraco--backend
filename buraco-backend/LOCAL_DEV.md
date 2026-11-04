@@ -54,4 +54,6 @@ npx jest             # unit tests (104 passing at the start of Milestone 1)
 ## Rules
 
 - `.env` here is **local only**. Never copy it to the live server, never commit it.
-- Never run `deploy.sh` — it deletes the server folder.
+- Deploying to the live server: follow `DEPLOY.md` (backup, new folder, switch, rollback).
+- `DEBUG_GAME_EVENTS=true` in this local `.env` keeps the QA "force round" event working
+  here; it is off on any server that does not set it.

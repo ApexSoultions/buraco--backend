@@ -1,12 +1,20 @@
 import { NestFactory, Reflector } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const compression = require('compression');
 import helmet from 'helmet';
 import { AppModule } from './app.module';
+import { checkSecretsOrThrow } from './config/env-check';
 
 async function bootstrap() {
+  // Before anything else: in production, weak or missing token secrets stop the start.
+  const secretWarnings = checkSecretsOrThrow();
+  if (secretWarnings.length) {
+    console.warn('[env] Not safe for production:\n  - ' + secretWarnings.join('\n  - '));
+  }
+
   const app = await NestFactory.create(AppModule);
 
   // Rate limits key signed-out traffic on req.ip. Trust X-Forwarded-For only from a proxy
@@ -63,14 +71,19 @@ async function bootstrap() {
     .addTag('Admin')
     .build();
 
-  const document = SwaggerModule.createDocument(app, swaggerConfig);
-  SwaggerModule.setup('/', app, document, {
-    swaggerOptions: { persistAuthorization: true },
-  });
+  // Public API map at `/`: useful while the client is being built, off for the release
+  // (SWAGGER_ENABLED=false).
+  const swaggerEnabled = app.get(ConfigService).get<boolean>('swagger.enabled') !== false;
+  if (swaggerEnabled) {
+    const document = SwaggerModule.createDocument(app, swaggerConfig);
+    SwaggerModule.setup('/', app, document, {
+      swaggerOptions: { persistAuthorization: true },
+    });
+  }
 
   const port = process.env.PORT || 3000;
   await app.listen(port);
   console.log(`Barasilian Cards Game API running on port ${port}`);
-  console.log(`Swagger docs at http://localhost:${port}/`);
+  console.log(swaggerEnabled ? `Swagger docs at http://localhost:${port}/` : 'Swagger docs disabled (SWAGGER_ENABLED=false)');
 }
 bootstrap();

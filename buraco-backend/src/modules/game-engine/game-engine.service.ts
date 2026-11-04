@@ -2034,7 +2034,7 @@ export class GameEngineService implements OnModuleInit {
   // resign / forfeit paths calls this. It never settles a match, never pays a reward,
   // never writes a match record and never ends a game — it only re-deals and rewrites the
   // scoreboard numbers in Redis. Gated by config `game.debugEventsEnabled`
-  // (DEBUG_GAME_EVENTS=false) at the gateway.
+  // (off unless DEBUG_GAME_EVENTS=true) at the gateway.
   //
   // Delete this method and its gateway handler once the 75-rule is signed off.
   async forceRoundForTesting(

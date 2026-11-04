@@ -66,9 +66,14 @@ export default () => ({
     newUserCoins: parseInt(process.env.NEW_USER_COINS ?? '1000', 10) || 1000,
     newUserDiamonds: parseInt(process.env.NEW_USER_DIAMONDS ?? '0', 10) || 0,
     newUserLives: parseInt(process.env.NEW_USER_LIVES ?? '5', 10) || 5,
-    // Kill switch for the temporary QA socket event `game:debug:force_round`.
-    // ON by default so the test build works on a freshly deployed server with no env
-    // change; set DEBUG_GAME_EVENTS=false to turn it off without a redeploy of code.
-    debugEventsEnabled: (process.env.DEBUG_GAME_EVENTS ?? 'true').toLowerCase() !== 'false',
+    // Switch for the QA socket event `game:debug:force_round`, which jumps a live match to a
+    // later round. OFF unless DEBUG_GAME_EVENTS=true: it used to default to on, which left it
+    // usable by any player on the live server. Turn it on in a local or test .env only.
+    debugEventsEnabled: (process.env.DEBUG_GAME_EVENTS ?? 'false').trim().toLowerCase() === 'true',
+  },
+
+  /** API docs page at `/`. On unless SWAGGER_ENABLED=false (turn it off for the public release). */
+  swagger: {
+    enabled: (process.env.SWAGGER_ENABLED ?? 'true').trim().toLowerCase() !== 'false',
   },
 });

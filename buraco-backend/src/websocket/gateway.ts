@@ -600,7 +600,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
    * `game:debug:error` on failure. Everyone at the table gets the normal `game:new_round`,
    * so no new client handling is needed beyond firing this event.
    *
-   * Turn it off on a server with `DEBUG_GAME_EVENTS=false`. Remove this handler and
+   * Off unless the server's .env sets `DEBUG_GAME_EVENTS=true`. Remove this handler and
    * GameEngineService.forceRoundForTesting once the 75-rule is signed off.
    */
   @SubscribeMessage('game:debug:force_round')
