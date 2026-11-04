@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiBody, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiBody, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { MoveType } from '@prisma/client';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -59,6 +59,23 @@ export class GameEngineController {
     @Body() body: Record<string, unknown>,
   ) {
     return this.gameEngineService.reportMatchResult(gameId, userId, body);
+  }
+
+  @Post(':gameId/resign')
+  @ApiOperation({
+    summary: 'Resign the match: the opponent wins',
+    description:
+      'Same as the socket event game:leave. Settles the match, broadcasts game:end (reason ' +
+      '"resigned") to everyone in the game, and returns that payload with the per-player ' +
+      'scoreboard. 404 unknown game, 403 not a player in it, 409 GAME_ALREADY_ENDED ' +
+      '(read GET /:gameId/result instead).',
+  })
+  @ApiResponse({ status: 201, description: 'Match ended; game:end payload' })
+  @ApiResponse({ status: 403, description: 'NOT_IN_GAME' })
+  @ApiResponse({ status: 404, description: 'Game not found' })
+  @ApiResponse({ status: 409, description: 'GAME_ALREADY_ENDED' })
+  resign(@Param('gameId') gameId: string, @CurrentUser('id') userId: string) {
+    return this.gameEngineService.resignAndAnnounce(gameId, userId);
   }
 
   @Post(':gameId/move/draw')

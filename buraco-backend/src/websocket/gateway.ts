@@ -577,14 +577,10 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     const gameId = data?.gameId ?? await this.redis.get(`user:${userId}:activeGame`);
     if (!gameId) return;
 
-    const result = await this.gameEngine.resignGame(gameId, userId);
-    if (!result) return;
-
-    this.server.to(`game:${gameId}`).emit('game:end', {
-      gameId,
-      reason: 'resigned',
-      ...result,
-    });
+    // Same path as REST POST /game/:id/resign; it broadcasts game:end to the room.
+    // A leave for a game that is unknown, not theirs or already over is ignored, as before.
+    const ended = await this.gameEngine.resignAndAnnounce(gameId, userId).catch(() => null);
+    if (!ended) return;
 
     const sockets = await this.server.in(`game:${gameId}`).fetchSockets();
     await Promise.all(sockets.map((s) => this.reconnection.clearActiveGame(s.data.userId)));

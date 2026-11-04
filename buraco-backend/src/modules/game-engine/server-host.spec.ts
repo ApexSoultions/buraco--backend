@@ -282,6 +282,35 @@ describe('settlement happens exactly once', () => {
   });
 });
 
+// ── Resign: REST POST /game/:id/resign and socket game:leave share resignAndAnnounce ──
+describe('resignAndAnnounce', () => {
+  it('gives the opponent the win, settles once, and tells the whole table', async () => {
+    const { service, prisma, socket } = buildService();
+
+    const payload = await service.resignAndAnnounce(GAME_ID, P1);
+
+    expect(payload).toEqual(expect.objectContaining({ gameId: GAME_ID, reason: 'resigned', isDraw: false, winnerTeam: 2, winnerIds: [P2] }));
+    expect(payload.players.map((p: any) => [p.userId, p.result])).toEqual([[P1, 'LOSS'], [P2, 'WIN']]);
+    expect(prisma.matchRecord.create).toHaveBeenCalledTimes(1);
+    expect(lastGameEnd(socket)).toEqual(payload);
+  });
+
+  it('a second resign for the same match is a 409, not a second payout', async () => {
+    const { service, prisma, redis } = buildService();
+    await service.resignAndAnnounce(GAME_ID, P1);
+    redis.getJson.mockResolvedValue(gameState({ status: GameStatus.COMPLETED }));
+
+    await expect(service.resignAndAnnounce(GAME_ID, P2)).rejects.toThrow('GAME_ALREADY_ENDED');
+    expect(prisma.matchRecord.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a player who is not in the game, and an unknown game', async () => {
+    const outsider = 'c3333333-3333-4333-8333-333333333333';
+    await expect(buildService().service.resignAndAnnounce(GAME_ID, outsider)).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(buildService({ state: null }).service.resignAndAnnounce(GAME_ID, P1)).rejects.toThrow('Game not found');
+  });
+});
+
 // ── #13: 12 auto-turns ends the MATCH, never just the round ───────────────────────────
 //
 // The dangerous case is the auto-played turn that would ALSO have ended the round: if the

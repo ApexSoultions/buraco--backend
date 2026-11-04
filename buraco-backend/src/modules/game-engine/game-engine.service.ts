@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { GameHost, GameMode, GameStatus, GameVariant, MoveType, Prisma, RoomStatus } from '@prisma/client';
 
@@ -2160,6 +2160,28 @@ export class GameEngineService implements OnModuleInit {
     await this.redis.setJson(this.stateKey(gameId), state, 7200);
 
     return { winnerTeam, winnerIds, scores, duration, players: this.toGameEndPlayers(playerRoundRows, winnerIds) };
+  }
+
+  /**
+   * Resign and tell the table, shared by socket `game:leave` and REST
+   * `POST /game/:id/resign` so both end the match identically: the opponent wins, the
+   * match is settled once, and everyone in the game room gets the same `game:end`.
+   *
+   * Returns the `game:end` payload, or throws a reason the caller can show: unknown game
+   * (404), not a player of it (403), or already over (409 — read GET /:id/result instead).
+   */
+  async resignAndAnnounce(gameId: string, userId: string) {
+    const result = await this.resignGame(gameId, userId);
+    if (!result) {
+      const state = await this.redis.getJson<GameState>(this.stateKey(gameId));
+      if (!state) throw new NotFoundException('Game not found');
+      if (!state.players.some(p => p.userId === userId)) throw new ForbiddenException('NOT_IN_GAME');
+      throw new ConflictException('GAME_ALREADY_ENDED');
+    }
+
+    const payload = { gameId, reason: 'resigned' as const, isDraw: false, ...result };
+    this.socketService.emitToRoom(`game:${gameId}`, 'game:end', payload);
+    return payload;
   }
 
   // ── Photon Fusion match-end reporting ─────────────────────────────────────
