@@ -2,6 +2,7 @@ import {
   Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, UseGuards, HttpCode,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { SkipThrottle, Throttle } from '@nestjs/throttler';
 import { AdminRole } from '@prisma/client';
 import { Public } from '../../common/decorators/public.decorator';
 import { AdminJwtGuard } from '../../common/guards/admin-jwt.guard';
@@ -22,6 +23,10 @@ import { CreateMissionDto } from './dto/create-mission.dto';
 @ApiTags('Admin')
 @Controller('admin')
 @Public()
+// The admin panel's server calls every route from one IP, and admin auth runs after the
+// global limiter, so the strict signed-out per-IP cap would block a busy dashboard.
+// Admin routes keep the per-IP default limit; login keeps the strict one.
+@SkipThrottle({ anon: true })
 export class AdminController {
   constructor(private readonly adminService: AdminService) {}
 
@@ -29,6 +34,8 @@ export class AdminController {
 
   @Post('auth/login')
   @Public()
+  @SkipThrottle({ anon: false })
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   @ApiOperation({ summary: 'Admin login' })
   login(@Body() dto: AdminLoginDto) {
     return this.adminService.login(dto);

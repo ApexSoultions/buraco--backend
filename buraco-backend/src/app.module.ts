@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { ScheduleModule } from '@nestjs/schedule';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
@@ -12,6 +12,7 @@ import { SocketModule } from './common/socket/socket.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
+import { AppThrottlerGuard, clientIp, isSignedIn, trackerFor } from './common/guards/app-throttler.guard';
 
 import { AuthModule } from './modules/auth/auth.module';
 import { UsersModule } from './modules/users/users.module';
@@ -38,7 +39,27 @@ import { AppGateway } from './websocket/gateway';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, load: [configuration] }),
-    ThrottlerModule.forRoot([{ ttl: 60000, limit: 100 }]),
+    // The module was configured but its guard was never registered, so no limit (including
+    // the stricter @Throttle ones on login / register / password reset) ever applied.
+    ThrottlerModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => {
+        const ttl = (config.get<number>('throttle.ttl') ?? 60) * 1000;
+        return {
+          throttlers: [
+            { name: 'default', ttl, limit: config.get<number>('throttle.limit') ?? 100 },
+            {
+              name: 'anon',
+              ttl,
+              limit: config.get<number>('throttle.anonLimit') ?? 60,
+              getTracker: (req: Record<string, any>) => `ip:${clientIp(req)}`,
+              skipIf: isSignedIn,
+            },
+          ],
+          getTracker: trackerFor,
+        };
+      },
+    }),
     ScheduleModule.forRoot(),
     PrismaModule,
     RedisModule,
@@ -70,6 +91,8 @@ import { AppGateway } from './websocket/gateway';
     { provide: APP_FILTER, useClass: HttpExceptionFilter },
     { provide: APP_INTERCEPTOR, useClass: TransformInterceptor },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
+    // After JwtAuthGuard on purpose: it sets req.user, which the limits are keyed on.
+    { provide: APP_GUARD, useClass: AppThrottlerGuard },
   ],
 })
 export class AppModule {}

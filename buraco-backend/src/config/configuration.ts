@@ -51,8 +51,13 @@ export default () => ({
   },
 
   throttle: {
+    /** Window in seconds for every limit below. */
     ttl: parseInt(process.env.THROTTLE_TTL ?? '60', 10) || 60,
+    /** Requests per window for a signed-in player (counted per player, not per IP). */
     limit: parseInt(process.env.THROTTLE_LIMIT ?? '100', 10) || 100,
+    /** Requests per window per IP for signed-out traffic (login, register, password reset). */
+    anonLimit: parseInt(process.env.THROTTLE_ANON_LIMIT ?? '60', 10) || 60,
+    // Socket chat has its own limit, THROTTLE_CHAT_PER_10S, read in AppGateway.
   },
 
   game: {

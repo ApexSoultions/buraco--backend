@@ -17,6 +17,7 @@ import { RedisService } from '../common/redis/redis.service';
 import { ReconnectionService } from '../modules/reconnection/reconnection.service';
 import { RoomsService } from '../modules/rooms/rooms.service';
 import { SocketService, userRoom } from '../common/socket/socket.service';
+import { SlidingWindowLimiter } from '../common/rate-limit/sliding-window';
 import { GameStatus, MoveType, RoomStatus } from '@prisma/client';
 import { Logger } from '@nestjs/common';
 
@@ -27,6 +28,12 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
 
   // Map userId → socketId for presence
   private userSockets = new Map<string, string>();
+
+  // At most THROTTLE_CHAT_PER_10S chat messages per player in any 10 seconds.
+  private readonly chatLimiter = new SlidingWindowLimiter(
+    parseInt(process.env.THROTTLE_CHAT_PER_10S ?? '10', 10) || 10,
+    10_000,
+  );
 
   constructor(
     private jwt: JwtService,
@@ -638,6 +645,11 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
   @SubscribeMessage('chat:send')
   async handleChatSend(@ConnectedSocket() socket: Socket, @MessageBody() data: { conversationId: string; content: string }) {
     const userId = socket.data.userId;
+    // Socket events bypass the HTTP rate limiter; cap chat so one client cannot flood a room.
+    if (!this.chatLimiter.tryAcquire(userId)) {
+      socket.emit('error', { code: 'CHAT_RATE_LIMITED', message: 'You are sending messages too fast' });
+      return;
+    }
     try {
       // sendMessage delivers `chat:message` to every member's user room itself.
       await this.messaging.sendMessage(data?.conversationId, userId, data?.content);

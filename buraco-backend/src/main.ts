@@ -9,6 +9,11 @@ import { AppModule } from './app.module';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
+  // Rate limits key signed-out traffic on req.ip. Trust X-Forwarded-For only from a proxy
+  // on this machine (e.g. nginx for HTTPS later); without it, every request would appear to
+  // come from 127.0.0.1 and share one limit. Direct clients cannot spoof the header.
+  app.getHttpAdapter().getInstance().set('trust proxy', 'loopback');
+
   // Security — CSP disabled so Swagger UI inline scripts load correctly
   app.use(
     helmet({
