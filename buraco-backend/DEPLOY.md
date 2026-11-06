@@ -91,6 +91,15 @@ cd ~/buraco-backend-new && npx prisma migrate deploy
 
 Migrations here only add; the old version keeps working on the migrated database.
 
+**Default content** (missions, shop items, missing config keys). The live database had
+none, so missions never appeared. Safe to repeat; never creates or changes admins:
+
+```bash
+cd ~/buraco-backend-new && NODE_ENV=production npx ts-node --transpile-only prisma/seed.ts --content
+```
+
+Never run the plain `npx prisma db seed` on a server: it is for local development.
+
 ### 5. Try the new version on a spare port first
 
 Only when **no match is in progress** (both versions would run the turn timer otherwise).

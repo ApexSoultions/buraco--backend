@@ -8,21 +8,38 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter } as any);
 
+// Usage:
+//   npx prisma db seed                         local: admin (if missing) + default content
+//   npx ts-node prisma/seed.ts --content       any server: missions, shop items and missing
+//                                              config keys only — never touches admins
+// Safe to run again: existing missions, shop items and config values are left as they are.
+const CONTENT_ONLY = process.argv.includes('--content');
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const LOCAL_ADMIN_PASSWORD = 'Admin@123!';
+
 async function main() {
-  console.log('Seeding database...');
+  console.log(CONTENT_ONLY ? 'Seeding default content (no admin)...' : 'Seeding database...');
 
   // ─── Super Admin ──────────────────────────────────────────────────────────
-  const adminExists = await prisma.adminUser.findUnique({ where: { email: 'admin@buraco.game' } });
+  // The password used to be hard-coded (and is visible in the repo). Outside local
+  // development it must come from SEED_ADMIN_PASSWORD.
+  const adminExists = CONTENT_ONLY || await prisma.adminUser.findUnique({ where: { email: 'admin@buraco.game' } });
   if (!adminExists) {
+    const password = process.env.SEED_ADMIN_PASSWORD ?? (IS_PRODUCTION ? '' : LOCAL_ADMIN_PASSWORD);
+    if (password.length < 12) {
+      throw new Error('Set SEED_ADMIN_PASSWORD (12+ characters) to create the admin account, or run with --content.');
+    }
     await prisma.adminUser.create({
       data: {
         email: 'admin@buraco.game',
-        passwordHash: await bcrypt.hash('Admin@123!', 12),
+        passwordHash: await bcrypt.hash(password, 12),
         name: 'Super Admin',
         role: AdminRole.SUPER_ADMIN,
       },
     });
-    console.log('Created super admin: admin@buraco.game / Admin@123!');
+    console.log(password === LOCAL_ADMIN_PASSWORD
+      ? `Created super admin: admin@buraco.game / ${LOCAL_ADMIN_PASSWORD} (local only)`
+      : 'Created super admin: admin@buraco.game (password from SEED_ADMIN_PASSWORD)');
   }
 
   // ─── System Config ────────────────────────────────────────────────────────
@@ -68,14 +85,16 @@ async function main() {
     { key: 'smtp_from',                 value: '' },
   ];
 
+  // Only adds missing keys. It used to reset every key to these defaults on each run,
+  // wiping values an admin had set in the panel (keys, fees, maintenance mode).
   for (const cfg of configs) {
     await prisma.systemConfig.upsert({
       where: { key: cfg.key },
-      update: { value: cfg.value },
+      update: {},
       create: { key: cfg.key, value: cfg.value },
     });
   }
-  console.log('Upserted system config entries:', configs.length);
+  console.log('System config keys ensured:', configs.length);
 
   // ─── Daily Missions ───────────────────────────────────────────────────────
   const dailyMissions = [

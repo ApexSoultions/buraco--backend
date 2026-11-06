@@ -23,6 +23,12 @@ One additive migration: `20261104120000_add_classic_points` (new `player_stats.c
 column, filled from past Classic wins). Nothing removed or renamed; the old version keeps
 working on a migrated database.
 
+## Default content
+
+The live database has no missions, shop items or config rows. The seed now has a
+content-only mode (`prisma/seed.ts --content`) that adds them without creating an admin
+account; the old seed hard-coded the admin password and reset admin-set config on every run.
+
 ## Server settings (`.env`) for the live server
 
 - `NODE_ENV=production`
@@ -42,6 +48,10 @@ working on a migrated database.
 ## Verification
 
 - 209 automated tests (19 suites, gameplay included) pass on a clean clone of the branch.
+- Copy of the live database (3 Nov backup): the migration applied cleanly, the Classic
+  points it filled in match the reward formula on the real matches, the schema matches
+  the code, rankings rebuilt for the 8 real players, and every feature check passed
+  against it with no server errors.
 - Each task was checked live against a local backend with two or more connected players.
 - Scan of the branch: no secrets or `.env` files committed, no hidden/obfuscated code.
 
