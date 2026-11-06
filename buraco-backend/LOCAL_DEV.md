@@ -50,6 +50,7 @@ npx jest             # unit tests (104 passing at the start of Milestone 1)
 
 - Admin panel: the super admin created by `prisma/seed.ts` (see that file).
 - Game: `local.tester1@example.test` / `Test@12345` — local database only.
+- Game, second player: `local.tester2@example.test` / `Test@12345` — local database only.
 
 ## Rules
 
