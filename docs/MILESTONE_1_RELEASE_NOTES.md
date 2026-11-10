@@ -66,6 +66,18 @@ spare-port check → switch → rollback ready). Additional checks for this rele
    who has not joined the game socket yet; confirm the Unity flow is unaffected).
 4. Watch for HTTP 429 in the client logs; raise `THROTTLE_LIMIT` if the client polls hard.
 
+## Also in this release: Milestone 2, Task 0 (backend for the new screens)
+
+| Route | For the screen |
+|---|---|
+| `GET /v1/profile/search?q=` | "Add new friend": find players by name (2+ characters, up to 20 results). Leaves out yourself, banned/deleted accounts and blocked players either way; each result says `FRIEND`, `REQUEST_SENT`, `REQUEST_RECEIVED` or `NONE` |
+| `DELETE /v1/messaging/conversations/{id}/messages` | "Clear chat": hides the messages from your own view only; the other player still sees them. Emits `chat:cleared` to your other screens |
+| `POST /v1/messaging/conversations/{id}/report` | "Report": `reason` (SPAM, ABUSE, INAPPROPRIATE, CHEATING, OTHER), optional `messageId` (required in club chat) and `details`. Saved for admin review; the same open report is not filed twice |
+
+Second additive migration: `20261110130257_add_chat_clear_and_reports` (new
+`conversation_members.clearedAt` column and a new `reports` table). Reports are reviewed in
+the admin panel in Milestone 6.
+
 ## Not in Milestone 1
 
 Phone push notifications (needs Firebase from the client), the Clean/Dirty Buraco
