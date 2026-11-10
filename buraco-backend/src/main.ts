@@ -7,6 +7,9 @@ const compression = require('compression');
 import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { checkSecretsOrThrow } from './config/env-check';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const express = require('express');
+import { PREDEFINED_AVATAR_DIR } from './modules/profile/profile.service';
 
 async function bootstrap() {
   // Before anything else: in production, weak or missing token secrets stop the start.
@@ -33,6 +36,9 @@ async function bootstrap() {
     ? process.env.CORS_ORIGINS.split(',').map((o) => o.trim())
     : '*';
   app.enableCors({ origin: allowedOrigins, credentials: true });
+
+  // Default avatar pictures (public, no login): GET /avatars/predefined/001.png …
+  app.use('/avatars/predefined', express.static(PREDEFINED_AVATAR_DIR, { maxAge: '7d' }));
 
   // Global prefix
   app.setGlobalPrefix('v1');

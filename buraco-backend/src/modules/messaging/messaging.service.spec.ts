@@ -34,8 +34,8 @@ function setup(opts: SetupOpts = {}) {
       updateMany: jest.fn(async () => ({ count: 2 })),
       findFirst: jest.fn(async () => null),
       findUnique: jest.fn(async () => opts.message ?? null),
-      findMany: jest.fn(async () => []),
-      count: jest.fn(async () => 0),
+      findMany: jest.fn(async (_args: any) => [] as any[]),
+      count: jest.fn(async (_args: any) => 0),
     },
     conversationMember: {
       findUnique: jest.fn(async () => ({ clearedAt: opts.clearedAt ?? null })),

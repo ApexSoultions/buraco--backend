@@ -32,6 +32,11 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     return this.client.mget(...keys);
   }
 
+  /** Set only if the key does not exist yet (atomic). True when this call set it. */
+  async setIfAbsent(key: string, value: string, ttlSeconds: number): Promise<boolean> {
+    return (await this.client.set(key, value, 'EX', ttlSeconds, 'NX')) === 'OK';
+  }
+
   set(key: string, value: string, ttlSeconds?: number) {
     if (ttlSeconds) return this.client.set(key, value, 'EX', ttlSeconds);
     return this.client.set(key, value);

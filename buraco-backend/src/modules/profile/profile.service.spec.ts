@@ -94,3 +94,27 @@ describe('ProfileService.searchPlayers', () => {
     expect(prisma.friendship.findMany).not.toHaveBeenCalled();
   });
 });
+
+describe('ProfileService.updateUsername', () => {
+  it('reports a name taken in the moment between check and save as USERNAME_TAKEN', async () => {
+    const prisma = {
+      user: {
+        findUnique: jest.fn(async () => null),
+        update: jest.fn(async () => { throw Object.assign(new Error('unique'), { code: 'P2002' }); }),
+      },
+    };
+    const service = new ProfileService(prisma as any, {} as any, {} as any);
+    await expect(service.updateUsername('me', 'taken_name')).rejects.toThrow('USERNAME_TAKEN');
+  });
+});
+
+describe('ProfileService predefined avatars', () => {
+  it('lists only avatars whose picture exists on the server', () => {
+    const service = new ProfileService({} as any, { get: () => 'http://host' } as any, {} as any);
+    const list = service.getPredefinedAvatars();
+    // public/avatars/predefined holds 001–004 (Figma default avatar + the three Figma
+    // "Choose From Default Avatars" pictures); 005 has no picture yet, so it is left out.
+    expect(list.map((a) => a.id)).toEqual(['avatar_001', 'avatar_002', 'avatar_003', 'avatar_004']);
+    expect(list[0].url).toBe('http://host/avatars/predefined/001.png');
+  });
+});

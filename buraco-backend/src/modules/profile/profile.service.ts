@@ -4,6 +4,11 @@ import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { SystemConfigService } from '../../common/system-config/system-config.service';
 import { v4 as uuidv4 } from 'uuid';
+import { existsSync } from 'fs';
+import { join } from 'path';
+
+/** Folder served at /avatars/predefined (see main.ts). */
+export const PREDEFINED_AVATAR_DIR = join(process.cwd(), 'public', 'avatars', 'predefined');
 
 export const SEARCH_MIN_CHARS = 2;
 export const SEARCH_MAX_CHARS = 30;
@@ -156,7 +161,13 @@ export class ProfileService {
   async updateUsername(userId: string, username: string) {
     const existing = await this.prisma.user.findUnique({ where: { username } });
     if (existing && existing.id !== userId) throw new ConflictException('USERNAME_TAKEN');
-    return this.prisma.user.update({ where: { id: userId }, data: { username }, select: { id: true, username: true } });
+    try {
+      return await this.prisma.user.update({ where: { id: userId }, data: { username }, select: { id: true, username: true } });
+    } catch (err: any) {
+      // Someone took the name between the check and the update.
+      if (err?.code === 'P2002') throw new ConflictException('USERNAME_TAKEN');
+      throw err;
+    }
   }
 
   async uploadAvatar(userId: string, file: Express.Multer.File) {
@@ -182,8 +193,13 @@ export class ProfileService {
     return { avatarUrl };
   }
 
+  /** Only avatars whose picture file is actually on the server. */
+  private availableAvatars() {
+    return PREDEFINED_AVATARS.filter((a) => existsSync(join(PREDEFINED_AVATAR_DIR, a.url.split('/').pop()!)));
+  }
+
   async setPredefinedAvatar(userId: string, predefinedId: string) {
-    const avatar = PREDEFINED_AVATARS.find((a) => a.id === predefinedId);
+    const avatar = this.availableAvatars().find((a) => a.id === predefinedId);
     if (!avatar) throw new NotFoundException('Predefined avatar not found');
     const appUrl = this.config.get<string>('appUrl');
     const avatarUrl = `${appUrl}${avatar.url}`;
@@ -193,6 +209,6 @@ export class ProfileService {
 
   getPredefinedAvatars() {
     const appUrl = this.config.get<string>('appUrl');
-    return PREDEFINED_AVATARS.map((a) => ({ ...a, url: `${appUrl}${a.url}` }));
+    return this.availableAvatars().map((a) => ({ ...a, url: `${appUrl}${a.url}` }));
   }
 }

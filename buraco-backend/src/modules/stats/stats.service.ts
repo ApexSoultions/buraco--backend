@@ -25,8 +25,26 @@ export class StatsService {
     const stats = await this.prisma.playerStats.findUnique({ where: { userId } });
     if (!stats) throw new NotFoundException('Stats not found');
 
-    const xpToNext = this.xpForNextLevel(stats.level);
-    return { ...stats, experienceToNextLevel: xpToNext - stats.experience };
+    const progress = this.levelProgress(stats.level, stats.experience);
+    return { ...stats, experienceToNextLevel: progress.xpForLevel - progress.xpIntoLevel, levelProgress: progress };
+  }
+
+  /**
+   * Where a player stands inside their current level. `experience` is total XP since the
+   * start; each level needs xpForNextLevel(level) more on top of all earlier levels.
+   */
+  levelProgress(level: number, experience: number) {
+    let accumulated = 0;
+    for (let l = 1; l < level; l++) accumulated += this.xpForNextLevel(l);
+    const xpForLevel = this.xpForNextLevel(level);
+    const xpIntoLevel = Math.min(Math.max(experience - accumulated, 0), xpForLevel);
+    return {
+      level,
+      nextLevel: level + 1,
+      xpIntoLevel,
+      xpForLevel,
+      percent: xpForLevel > 0 ? Math.floor((xpIntoLevel / xpForLevel) * 100) : 0,
+    };
   }
 
   /**

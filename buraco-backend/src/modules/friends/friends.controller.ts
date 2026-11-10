@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post, Put, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiBody, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -45,7 +45,7 @@ export class FriendsController {
   @ApiResponse({ status: 201, description: 'Request sent' })
   @ApiResponse({ status: 400, description: 'Already friends or request pending' })
   @ApiResponse({ status: 404, description: 'Target player not found' })
-  sendRequest(@CurrentUser('id') userId: string, @Body('userId') targetId: string) {
+  sendRequest(@CurrentUser('id') userId: string, @Body('userId', new ParseUUIDPipe()) targetId: string) {
     return this.friendsService.sendRequest(userId, targetId);
   }
 
@@ -83,7 +83,7 @@ export class FriendsController {
   @ApiBody({ schema: { type: 'object', properties: { userId: { type: 'string', description: 'Player UUID to block' } }, required: ['userId'] } })
   @ApiResponse({ status: 201, description: 'User blocked' })
   @ApiResponse({ status: 404, description: 'Target player not found' })
-  blockUser(@CurrentUser('id') userId: string, @Body('userId') targetId: string) {
+  blockUser(@CurrentUser('id') userId: string, @Body('userId', new ParseUUIDPipe()) targetId: string) {
     return this.friendsService.blockUser(userId, targetId);
   }
 

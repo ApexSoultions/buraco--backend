@@ -12,21 +12,31 @@ export class EconomyService {
     private sysConfig: SystemConfigService,
   ) {}
 
+  /**
+   * Daily login reward, once per UTC day. The day's marker is taken atomically before
+   * paying, so two requests at the same moment (two devices, a double tap) pay once.
+   * `nextClaimAt` is the next UTC midnight; `coins` is the balance after a payout.
+   */
   async claimDailyReward(userId: string) {
     const key = `daily:${userId}`;
-    const already = await this.redis.get(key);
-    if (already) return { claimed: false, message: 'Already claimed today' };
-
-    const rewardCoins = await this.sysConfig.getNumber('daily_login_reward_coins', 200);
-    await this.addCoins(userId, rewardCoins, TransactionType.REWARD, undefined, 'Daily login reward');
-
     const now = new Date();
     const midnight = new Date(now);
     midnight.setUTCHours(24, 0, 0, 0);
-    const ttl = Math.floor((midnight.getTime() - now.getTime()) / 1000);
-    await this.redis.set(key, '1', ttl);
+    const ttl = Math.max(1, Math.floor((midnight.getTime() - now.getTime()) / 1000));
+    const nextClaimAt = midnight.toISOString();
 
-    return { claimed: true, coinsAwarded: rewardCoins };
+    if (!(await this.redis.setIfAbsent(key, '1', ttl))) {
+      return { claimed: false, message: 'Already claimed today', nextClaimAt };
+    }
+
+    try {
+      const rewardCoins = await this.sysConfig.getNumber('daily_login_reward_coins', 200);
+      const coins = await this.addCoins(userId, rewardCoins, TransactionType.REWARD, undefined, 'Daily login reward');
+      return { claimed: true, coinsAwarded: rewardCoins, coins, nextClaimAt };
+    } catch (err) {
+      await this.redis.del(key); // not paid: allow another try today
+      throw err;
+    }
   }
 
   async getBalance(userId: string) {

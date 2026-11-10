@@ -260,7 +260,8 @@ export class AuthService {
     if (!user?.passwordHash) throw new BadRequestException('No password set on this account');
 
     const valid = await bcrypt.compare(dto.currentPassword, user.passwordHash);
-    if (!valid) throw new UnauthorizedException('Current password is incorrect');
+    // 400, not 401: a mistyped password must not look like an expired login to the app.
+    if (!valid) throw new BadRequestException('Current password is incorrect');
 
     const passwordHash = await bcrypt.hash(dto.newPassword, 12);
     await this.prisma.user.update({ where: { id: userId }, data: { passwordHash } });
