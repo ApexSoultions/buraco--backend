@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Param, ParseUUIDPipe, Post, Put, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import {
   ApiBearerAuth, ApiBody, ApiConsumes, ApiOperation,
@@ -9,6 +9,7 @@ import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { S3Service } from '../../common/s3/s3.service';
 import { MAX_VOICE_SECONDS, MessagingService } from './messaging.service';
+import { ReportChatDto } from './dto/report-chat.dto';
 
 const ALLOWED_AUDIO_TYPES = ['audio/mpeg', 'audio/mp4', 'audio/webm', 'audio/ogg', 'audio/wav', 'audio/aac', 'audio/x-m4a'];
 
@@ -120,5 +121,33 @@ export class MessagingController {
   @ApiResponse({ status: 403, description: 'Not a member of this conversation' })
   markAsRead(@Param('conversationId') conversationId: string, @CurrentUser('id') userId: string) {
     return this.messagingService.markAsRead(conversationId, userId);
+  }
+
+  @Delete('conversations/:conversationId/messages')
+  @ApiOperation({ summary: 'Clear chat: hides all messages up to now from your own view only' })
+  @ApiParam({ name: 'conversationId', description: 'Conversation UUID' })
+  @ApiResponse({ status: 200, description: '{ conversationId, clearedAt }. Also emits chat:cleared to your own sockets. Other members still see the messages.' })
+  @ApiResponse({ status: 403, description: 'Not a member of this conversation' })
+  @ApiResponse({ status: 404, description: 'Conversation not found' })
+  clearConversation(
+    @Param('conversationId', new ParseUUIDPipe()) conversationId: string,
+    @CurrentUser('id') userId: string,
+  ) {
+    return this.messagingService.clearConversation(conversationId, userId);
+  }
+
+  @Post('conversations/:conversationId/report')
+  @ApiOperation({ summary: 'Report a player from a chat, for admin review' })
+  @ApiParam({ name: 'conversationId', description: 'Conversation UUID' })
+  @ApiResponse({ status: 201, description: '{ id, status, createdAt, alreadyReported }. alreadyReported is true when the same open report exists.' })
+  @ApiResponse({ status: 400, description: 'Invalid reason, own message, or no message picked in a club chat' })
+  @ApiResponse({ status: 403, description: 'Not a member of this conversation' })
+  @ApiResponse({ status: 404, description: 'Conversation or message not found' })
+  reportConversation(
+    @Param('conversationId', new ParseUUIDPipe()) conversationId: string,
+    @CurrentUser('id') userId: string,
+    @Body() dto: ReportChatDto,
+  ) {
+    return this.messagingService.reportConversation(conversationId, userId, dto);
   }
 }

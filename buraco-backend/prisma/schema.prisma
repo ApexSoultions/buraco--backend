@@ -211,6 +211,8 @@ model User {
   adminNotes          AdminNote[]
   conversationMembers ConversationMember[]
   messages            Message[]
+  reportsMade         Report[]           @relation("ReportsMade")
+  reportsReceived     Report[]           @relation("ReportsReceived")
 
   @@map("users")
 }
@@ -356,6 +358,7 @@ model Conversation {
 
   messages Message[]
   members  ConversationMember[]
+  reports  Report[]
 
   @@map("conversations")
 }
@@ -367,6 +370,9 @@ model ConversationMember {
   conversation   Conversation @relation(fields: [conversationId], references: [id])
   user           User         @relation(fields: [userId], references: [id])
   joinedAt       DateTime     @default(now())
+  /// "Clear chat": this member no longer sees messages sent at or before this time.
+  /// The other members' view is unchanged.
+  clearedAt      DateTime?
 
   @@unique([conversationId, userId])
   @@map("conversation_members")
@@ -384,10 +390,46 @@ model Message {
   duration       Int?
   isRead         Boolean      @default(false)
   createdAt      DateTime     @default(now())
+  reports        Report[]
 
   @@index([conversationId])
   @@index([createdAt])
   @@map("messages")
+}
+
+enum ReportReason {
+  SPAM
+  ABUSE
+  INAPPROPRIATE
+  CHEATING
+  OTHER
+}
+
+enum ReportStatus {
+  OPEN
+  REVIEWED
+  DISMISSED
+}
+
+/// A player reporting another player (from a chat or a message), for admin review.
+model Report {
+  id             String        @id @default(uuid())
+  reporterId     String
+  reporter       User          @relation("ReportsMade", fields: [reporterId], references: [id])
+  reportedUserId String
+  reportedUser   User          @relation("ReportsReceived", fields: [reportedUserId], references: [id])
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id])
+  messageId      String?
+  message        Message?      @relation(fields: [messageId], references: [id])
+  reason         ReportReason
+  details        String?
+  status         ReportStatus  @default(OPEN)
+  createdAt      DateTime      @default(now())
+
+  @@index([status, createdAt])
+  @@index([reportedUserId])
+  @@map("reports")
 }
 
 // ─────────────────────────────────────────────

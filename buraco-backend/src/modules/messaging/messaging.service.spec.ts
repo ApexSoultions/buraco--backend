@@ -10,7 +10,16 @@ const ALICE = 'a1111111-1111-4111-8111-111111111111';
 const BOB = 'b2222222-2222-4222-8222-222222222222';
 const MALLORY = 'c3333333-3333-4333-8333-333333333333';
 
-function setup(opts: { members?: string[] | null; type?: 'DIRECT' | 'CLUB'; blocked?: boolean } = {}) {
+type SetupOpts = {
+  members?: string[] | null;
+  type?: 'DIRECT' | 'CLUB';
+  blocked?: boolean;
+  clearedAt?: Date | null;
+  message?: { conversationId: string; senderId: string } | null;
+  openReport?: boolean;
+};
+
+function setup(opts: SetupOpts = {}) {
   const members = opts.members === undefined ? [ALICE, BOB] : opts.members;
   const prisma = {
     conversation: {
@@ -24,7 +33,18 @@ function setup(opts: { members?: string[] | null; type?: 'DIRECT' | 'CLUB'; bloc
       create: jest.fn(async ({ data }: any) => ({ id: 'm1', ...data, sender: { id: data.senderId } })),
       updateMany: jest.fn(async () => ({ count: 2 })),
       findFirst: jest.fn(async () => null),
+      findUnique: jest.fn(async () => opts.message ?? null),
+      findMany: jest.fn(async () => []),
       count: jest.fn(async () => 0),
+    },
+    conversationMember: {
+      findUnique: jest.fn(async () => ({ clearedAt: opts.clearedAt ?? null })),
+      findMany: jest.fn(async () => []),
+      update: jest.fn(async ({ data }: any) => data),
+    },
+    report: {
+      findFirst: jest.fn(async () => (opts.openReport ? { id: 'r-old', status: 'OPEN', createdAt: new Date(0) } : null)),
+      create: jest.fn(async ({ data }: any) => ({ id: 'r-new', status: 'OPEN', createdAt: new Date(), ...data })),
     },
     user: {
       findUnique: jest.fn(async ({ where }: any) => (where.id === BOB ? { id: BOB, username: 'bob', avatarUrl: null } : null)),
@@ -140,6 +160,108 @@ describe('MessagingService — start a private chat', () => {
   it('refuses when either player has blocked the other', async () => {
     const { service } = setup({ blocked: true });
     await expect(service.startDirectConversation(ALICE, BOB)).rejects.toThrow('USER_BLOCKED');
+  });
+});
+
+describe('MessagingService — clear chat', () => {
+  const CLEARED = new Date('2026-11-10T12:00:00Z');
+
+  it("hides earlier messages from the clearer's own view only", async () => {
+    const { service, prisma, socket } = setup();
+    const res = await service.clearConversation(CONV, ALICE);
+
+    expect(prisma.conversationMember.update).toHaveBeenCalledWith({
+      where: { conversationId_userId: { conversationId: CONV, userId: ALICE } },
+      data: { clearedAt: res.clearedAt },
+    });
+    expect(socket.emitToUsers).toHaveBeenCalledWith([ALICE], 'chat:cleared', expect.objectContaining({ conversationId: CONV }));
+  });
+
+  it('refuses a non-member', async () => {
+    const { service, prisma } = setup();
+    await expect(service.clearConversation(CONV, MALLORY)).rejects.toBeInstanceOf(ForbiddenException);
+    expect(prisma.conversationMember.update).not.toHaveBeenCalled();
+  });
+
+  it('history after clearing only returns newer messages', async () => {
+    const { service, prisma } = setup({ clearedAt: CLEARED });
+    await service.getHistory(CONV, ALICE);
+
+    const expected = { conversationId: CONV, createdAt: { gt: CLEARED } };
+    expect(prisma.message.findMany.mock.calls[0][0].where).toEqual(expected);
+    expect(prisma.message.count.mock.calls[0][0].where).toEqual(expected);
+  });
+
+  it('history of a never-cleared chat is not filtered', async () => {
+    const { service, prisma } = setup();
+    await service.getHistory(CONV, ALICE);
+    expect(prisma.message.findMany.mock.calls[0][0].where).toEqual({ conversationId: CONV });
+  });
+
+  it('the chat list hides a last message from before the clear and counts only newer unread', async () => {
+    const { service, prisma } = setup();
+    (prisma.conversation as any).findMany = jest.fn(async () => [{
+      id: CONV, type: 'DIRECT', club: null,
+      members: [{ user: { id: BOB, username: 'bob', avatarUrl: null } }],
+      messages: [{ id: 'old', createdAt: new Date('2026-11-10T11:00:00Z') }],
+    }]);
+    prisma.conversationMember.findMany.mockResolvedValue([{ conversationId: CONV, clearedAt: CLEARED }] as any);
+
+    const [row] = await service.getConversations(ALICE);
+
+    expect(row.lastMessage).toBeNull();
+    expect(prisma.message.count.mock.calls[0][0].where).toEqual(
+      expect.objectContaining({ conversationId: CONV, createdAt: { gt: CLEARED }, isRead: false }),
+    );
+  });
+});
+
+describe('MessagingService — report', () => {
+  it('reports the other player of a 1-to-1 chat when no message is picked', async () => {
+    const { service, prisma } = setup();
+    const res = await service.reportConversation(CONV, ALICE, { reason: 'ABUSE' as any, details: '  rude  ' });
+
+    expect(prisma.report.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: { reporterId: ALICE, reportedUserId: BOB, conversationId: CONV, messageId: null, reason: 'ABUSE', details: 'rude' },
+    }));
+    expect(res.alreadyReported).toBe(false);
+  });
+
+  it("reports a picked message's sender", async () => {
+    const { service, prisma } = setup({ type: 'CLUB', members: [ALICE, BOB, MALLORY], message: { conversationId: CONV, senderId: MALLORY } });
+    await service.reportConversation(CONV, ALICE, { reason: 'SPAM' as any, messageId: 'm9' });
+
+    expect(prisma.report.create.mock.calls[0][0].data).toEqual(expect.objectContaining({ reportedUserId: MALLORY, messageId: 'm9' }));
+  });
+
+  it('needs a picked message in a club chat', async () => {
+    const { service, prisma } = setup({ type: 'CLUB', members: [ALICE, BOB, MALLORY] });
+    await expect(service.reportConversation(CONV, ALICE, { reason: 'SPAM' as any })).rejects.toBeInstanceOf(BadRequestException);
+    expect(prisma.report.create).not.toHaveBeenCalled();
+  });
+
+  it('refuses reporting your own message, or a message from another chat', async () => {
+    const own = setup({ message: { conversationId: CONV, senderId: ALICE } });
+    await expect(own.service.reportConversation(CONV, ALICE, { reason: 'SPAM' as any, messageId: 'm1' }))
+      .rejects.toBeInstanceOf(BadRequestException);
+
+    const elsewhere = setup({ message: { conversationId: 'other-conv', senderId: BOB } });
+    await expect(elsewhere.service.reportConversation(CONV, ALICE, { reason: 'SPAM' as any, messageId: 'm1' }))
+      .rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('refuses a non-member', async () => {
+    const { service, prisma } = setup();
+    await expect(service.reportConversation(CONV, MALLORY, { reason: 'SPAM' as any })).rejects.toBeInstanceOf(ForbiddenException);
+    expect(prisma.report.create).not.toHaveBeenCalled();
+  });
+
+  it('does not file the same open report twice', async () => {
+    const { service, prisma } = setup({ openReport: true });
+    const res = await service.reportConversation(CONV, ALICE, { reason: 'ABUSE' as any });
+
+    expect(res).toEqual(expect.objectContaining({ id: 'r-old', alreadyReported: true }));
+    expect(prisma.report.create).not.toHaveBeenCalled();
   });
 });
 

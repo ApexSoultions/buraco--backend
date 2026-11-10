@@ -1,12 +1,12 @@
-import { Body, Controller, Get, Param, Post, Put, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Put, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import {
   ApiBearerAuth, ApiBody, ApiConsumes, ApiOperation,
-  ApiParam, ApiResponse, ApiTags,
+  ApiParam, ApiQuery, ApiResponse, ApiTags,
 } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import { ProfileService } from './profile.service';
+import { ProfileService, SEARCH_MAX_RESULTS, SEARCH_MIN_CHARS } from './profile.service';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 
 @ApiTags('Profile')
@@ -22,6 +22,26 @@ export class ProfileController {
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   getMyProfile(@CurrentUser('id') userId: string) {
     return this.profileService.getProfile(userId);
+  }
+
+  // Declared before ':userId' so "search" is not read as a player id.
+  @Get('search')
+  @ApiOperation({ summary: 'Search players by username (for "Add new friend")' })
+  @ApiQuery({ name: 'q', description: `Part of a username, at least ${SEARCH_MIN_CHARS} characters` })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: `Max results (default and max ${SEARCH_MAX_RESULTS})` })
+  @ApiResponse({
+    status: 200,
+    description: 'Array of { id, username, avatarUrl, level, points, relation, requestId }. relation is FRIEND, '
+      + 'REQUEST_SENT, REQUEST_RECEIVED or NONE; requestId is set for the two REQUEST_ values. '
+      + 'Blocked players (either way), banned and deleted accounts and yourself are left out.',
+  })
+  @ApiResponse({ status: 400, description: 'Search text too short or too long' })
+  searchPlayers(
+    @CurrentUser('id') userId: string,
+    @Query('q') query: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.profileService.searchPlayers(userId, query, limit === undefined ? undefined : Number(limit));
   }
 
   @Get(':userId')

@@ -47,7 +47,7 @@ account; the old seed hard-coded the admin password and reset admin-set config o
 
 ## Verification
 
-- 209 automated tests (19 suites, gameplay included) pass on a clean clone of the branch.
+- 227 automated tests (20 suites, gameplay included) pass on a clean clone of the branch.
 - Copy of the live database (3 Nov backup): the migration applied cleanly, the Classic
   points it filled in match the reward formula on the real matches, the schema matches
   the code, rankings rebuilt for the 8 real players, and every feature check passed
