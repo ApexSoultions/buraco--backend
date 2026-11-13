@@ -186,6 +186,8 @@ model User {
   lives              Int                @default(5)
   subscriptionStatus SubscriptionStatus @default(FREE)
   subscriptionExpiry DateTime?
+  /// Voice chat subscription ("Voice chat" plans): active until this time.
+  voiceChatExpiry    DateTime?
   isBanned           Boolean            @default(false)
   banReason          String?
   isDeleted          Boolean            @default(false)
@@ -214,6 +216,7 @@ model User {
   reportsMade         Report[]             @relation("ReportsMade")
   reportsReceived     Report[]             @relation("ReportsReceived")
   iapPurchases        IapPurchase[]
+  iapSubscriptions    IapSubscription[]
 
   @@map("users")
 }
@@ -785,4 +788,23 @@ model IapPurchase {
   @@unique([store, transactionId])
   @@index([userId])
   @@map("iap_purchases")
+}
+
+/// A store subscription (Premium or Voice chat), linked to the first player who claimed it.
+/// originalId is Google's purchase token or Apple's original transaction ID: the same for every
+/// renewal, so a renewal only moves expiresAt forward.
+model IapSubscription {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  store      String // GOOGLE_PLAY, APPLE, FAKE
+  originalId String
+  productId  String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([store, originalId])
+  @@index([userId])
+  @@map("iap_subscriptions")
 }

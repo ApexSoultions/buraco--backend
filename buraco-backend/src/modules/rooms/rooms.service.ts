@@ -11,6 +11,7 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { EconomyService } from '../economy/economy.service';
 import { GameEngineService } from '../game-engine/game-engine.service';
 import { RedisService } from '../../common/redis/redis.service';
+import { isPremiumActive } from '../../common/premium/premium';
 import { SocketService } from '../../common/socket/socket.service';
 
 interface CreateRoomOptions {
@@ -392,6 +393,11 @@ export class RoomsService implements OnModuleInit {
   async createRoom(userId: string, opts: CreateRoomOptions) {
     const maxPlayers = opts.variant === GameVariant.ONE_VS_ONE ? 2 : 4;
     const isProfessional = opts.mode === GameMode.PROFESSIONAL;
+    // Creating a Professional table is a Premium feature (the same rule as Professional matchmaking).
+    if (isProfessional) {
+      const creator = await this.prisma.user.findUnique({ where: { id: userId }, select: { subscriptionStatus: true, subscriptionExpiry: true } });
+      if (!isPremiumActive(creator)) throw new ForbiddenException('SUBSCRIPTION_REQUIRED');
+    }
     const room = await this.prisma.room.create({
       data: {
         mode: opts.mode,

@@ -1,7 +1,7 @@
 import { BadRequestException, ServiceUnavailableException } from '@nestjs/common';
 import { createHash, createPrivateKey, sign, X509Certificate } from 'crypto';
 import { Prisma } from '@prisma/client';
-import { IapService } from './iap.service';
+import { addPeriod, IapService } from './iap.service';
 import { AppleVerifier, StoreVerifyError } from './store-verifier';
 import { TEST_LEAF_B64, TEST_LEAF_KEY_PEM, TEST_ROOT_B64 } from './test-certs.fixture';
 
@@ -24,7 +24,7 @@ describe('AppleVerifier', () => {
   const apple = new AppleVerifier(BUNDLE, ROOT_SHA);
 
   it('accepts a transaction signed through the pinned root', () => {
-    expect(apple.verify('coins_1000', jws(tx()))).toEqual({ transactionId: 't-1', productId: 'coins_1000', environment: 'Sandbox' });
+    expect(apple.verify('coins_1000', jws(tx()))).toMatchObject({ transactionId: 't-1', productId: 'coins_1000', environment: 'Sandbox', originalId: 't-1' });
   });
 
   it('refuses a changed signature, another app, another product, a refund, or a non-Apple root', () => {
@@ -55,12 +55,29 @@ function setup(env: Record<string, unknown> = {}) {
     user: { update: jest.fn(async ({ data }: any) => { coins += data.coins.increment; return { coins }; }) },
     transaction: { create: jest.fn(async () => ({})) },
   };
+  const subs = new Map<string, { userId: string; productId: string; expiresAt: Date }>();
+  const user = { subscriptionStatus: 'FREE', subscriptionExpiry: null as Date | null, voiceChatExpiry: null as Date | null };
   const prisma = {
     $transaction: jest.fn(async (fn: any) => fn(txClient)),
-    iapPurchase: { findUnique: jest.fn(async ({ where }: any) => rows.get(`${where.store_transactionId.store}:${where.store_transactionId.transactionId}`) ?? null) },
-    user: { findUnique: jest.fn(async () => ({ coins })) },
+    iapPurchase: {
+      findUnique: jest.fn(async ({ where }: any) => rows.get(`${where.store_transactionId.store}:${where.store_transactionId.transactionId}`) ?? null),
+      create: txClient.iapPurchase.create,
+    },
+    iapSubscription: {
+      findUnique: jest.fn(async ({ where }: any) => subs.get(`${where.store_originalId.store}:${where.store_originalId.originalId}`) ?? null),
+      upsert: jest.fn(async ({ where, create, update }: any) => {
+        const key = `${where.store_originalId.store}:${where.store_originalId.originalId}`;
+        const row = subs.get(key);
+        subs.set(key, row ? { ...row, ...update } : create);
+      }),
+      findMany: jest.fn(async ({ where }: any) => [...subs.values()].filter((r) => r.userId === where.userId)),
+    },
+    user: {
+      findUnique: jest.fn(async () => ({ coins, ...user })),
+      update: jest.fn(async ({ data }: any) => Object.assign(user, data)),
+    },
   };
-  return { service: new IapService(prisma as any, config as any), coins: () => coins };
+  return { service: new IapService(prisma as any, config as any), coins: () => coins, user };
 }
 
 describe('IapService.verifyAndGrant', () => {
@@ -97,8 +114,59 @@ describe('IapService.verifyAndGrant', () => {
     expect(coins()).toBe(100);
   });
 
-  it('lists the 7 coin packs in Figma order', () => {
+  it('lists the 7 coin packs in Figma order and the 7 plans', () => {
     const list = setup().service.listProducts();
-    expect(list.map((p) => p.productId)).toEqual(['coins_50000', 'coins_25000', 'coins_10000', 'coins_5000', 'coins_3000', 'coins_2000', 'coins_1000']);
+    expect(list.filter((p) => p.type === 'CONSUMABLE').map((p) => p.productId)).toEqual(['coins_50000', 'coins_25000', 'coins_10000', 'coins_5000', 'coins_3000', 'coins_2000', 'coins_1000']);
+    expect(list.filter((p) => p.type === 'SUBSCRIPTION')).toHaveLength(7);
   });
 });
+
+describe('IapService — subscriptions', () => {
+  const later = (days: number) => Date.now() + days * 86400000;
+
+  it('a Premium plan sets Premium until the store end date; a renewal moves it forward', async () => {
+    const { service, user } = setup();
+    const end1 = later(30);
+    const first = await service.verifyAndGrant('u1', {
+      store: 'APPLE', productId: 'premium_1_month',
+      signedTransaction: jws(tx({ productId: 'premium_1_month', transactionId: 'r1', originalTransactionId: 'orig', expiresDate: end1 })),
+    });
+    expect(first).toMatchObject({ granted: true, entitlements: { isPremium: true, hasVoiceChat: false } });
+    expect(user.subscriptionStatus).toBe('PREMIUM');
+    expect(user.subscriptionExpiry?.getTime()).toBe(end1);
+
+    const end2 = later(60);
+    await service.verifyAndGrant('u1', {
+      store: 'APPLE', productId: 'premium_1_month',
+      signedTransaction: jws(tx({ productId: 'premium_1_month', transactionId: 'r2', originalTransactionId: 'orig', expiresDate: end2 })),
+    });
+    expect(user.subscriptionExpiry?.getTime()).toBe(end2);
+  });
+
+  it('a subscription can only belong to one player', async () => {
+    const { service } = setup();
+    const signed = jws(tx({ productId: 'premium_1_month', transactionId: 'r1', originalTransactionId: 'orig', expiresDate: later(30) }));
+    await service.verifyAndGrant('u1', { store: 'APPLE', productId: 'premium_1_month', signedTransaction: signed });
+    await expect(service.verifyAndGrant('u2', { store: 'APPLE', productId: 'premium_1_month', signedTransaction: signed })).rejects.toThrow(BadRequestException);
+  });
+
+  it('Voice chat is separate from Premium; an ended plan unlocks nothing', async () => {
+    const { service, user } = setup();
+    await service.verifyAndGrant('u1', { store: 'FAKE', productId: 'voice_chat_1_week', transactionId: 'v1' });
+    expect(user.voiceChatExpiry && user.voiceChatExpiry.getTime() > Date.now()).toBe(true);
+    expect(user.subscriptionStatus).toBe('FREE');
+
+    const ended = await service.verifyAndGrant('u1', {
+      store: 'APPLE', productId: 'premium_1_week',
+      signedTransaction: jws(tx({ productId: 'premium_1_week', transactionId: 'old', originalTransactionId: 'old', expiresDate: later(-1) })),
+    });
+    expect(ended).toMatchObject({ expired: true, entitlements: { isPremium: false } });
+  });
+
+  it('adds store periods', () => {
+    const from = new Date('2026-01-31T00:00:00Z');
+    expect(addPeriod(from, 'P1W').toISOString()).toBe('2026-02-07T00:00:00.000Z');
+    expect(addPeriod(from, 'P1Y').toISOString()).toBe('2027-01-31T00:00:00.000Z');
+  });
+});
+

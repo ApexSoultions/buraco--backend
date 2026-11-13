@@ -13,9 +13,15 @@ export class IapController {
   constructor(private readonly iap: IapService) {}
 
   @Get('products')
-  @ApiOperation({ summary: 'Coin packs sold through Google Play / the App Store (product IDs, coins, Figma reference price)' })
+  @ApiOperation({ summary: 'Coin packs and subscription plans sold through Google Play / the App Store (IDs, coins or plan, Figma reference price)' })
   products() {
     return this.iap.listProducts();
+  }
+
+  @Get('entitlements')
+  @ApiOperation({ summary: 'Whether the player has Premium / Voice chat, and until when' })
+  entitlements(@CurrentUser('id') userId: string) {
+    return this.iap.getEntitlements(userId);
   }
 
   @Post('verify')

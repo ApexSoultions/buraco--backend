@@ -2,6 +2,7 @@ import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/com
 import { GameMode, GameVariant } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { RedisService } from '../../common/redis/redis.service';
+import { isPremiumActive } from '../../common/premium/premium';
 import { EconomyService } from '../economy/economy.service';
 
 const ENTRY_FEES: Record<string, Record<string, number>> = {
@@ -36,7 +37,7 @@ export class MatchmakingService {
     if (activeGame) throw new BadRequestException('ALREADY_IN_GAME');
 
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
-    if (mode === GameMode.PROFESSIONAL && user?.subscriptionStatus === 'FREE') {
+    if (mode === GameMode.PROFESSIONAL && !isPremiumActive(user)) {
       throw new ForbiddenException('SUBSCRIPTION_REQUIRED');
     }
 

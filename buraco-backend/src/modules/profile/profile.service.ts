@@ -5,6 +5,7 @@ import { PrismaService } from '../../common/prisma/prisma.service';
 import { SystemConfigService } from '../../common/system-config/system-config.service';
 import { RedisService } from '../../common/redis/redis.service';
 import { onlineSet } from '../../common/presence/presence';
+import { isPremiumActive, isVoiceChatActive } from '../../common/premium/premium';
 import { v4 as uuidv4 } from 'uuid';
 import { existsSync } from 'fs';
 import { join } from 'path';
@@ -53,7 +54,8 @@ export class ProfileService {
     if (!user) throw new NotFoundException('User not found');
 
     const { passwordHash, googleId, appleId, ...safe } = user;
-    return safe;
+    // Premium / voice chat only count until they run out.
+    return { ...safe, isPremium: isPremiumActive(user), hasVoiceChat: isVoiceChatActive(user) };
   }
 
   /**
@@ -71,6 +73,7 @@ export class ProfileService {
         registrationDate: true,
         lastSeenAt: true,
         subscriptionStatus: true,
+        subscriptionExpiry: true,
         stats: {
           select: {
             level: true, points: true, classicPoints: true, gamesPlayed: true, wins: true, losses: true,
@@ -114,8 +117,9 @@ export class ProfileService {
     return {
       ...user,
       online,
-      isPremium: user.subscriptionStatus !== 'FREE',
+      isPremium: isPremiumActive(user),
       subscriptionStatus: undefined,
+      subscriptionExpiry: undefined,
       club: membership ? { ...membership.club, role: membership.role } : null,
       clubMemberships: undefined,
       isMe: viewerId === userId,

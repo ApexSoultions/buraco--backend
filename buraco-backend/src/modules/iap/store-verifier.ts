@@ -5,6 +5,10 @@ export interface VerifiedPurchase {
   transactionId: string;
   productId: string;
   environment: string;
+  /** Subscriptions: the same for every renewal (Google purchase token / Apple original transaction ID). */
+  originalId?: string;
+  /** Subscriptions: when the current paid period ends. */
+  expiresAt?: Date;
 }
 
 export class StoreVerifyError extends Error {
@@ -19,6 +23,13 @@ interface GoogleProductPurchase {
   purchaseState?: number;
   orderId?: string;
   purchaseType?: number;
+}
+
+interface GoogleSubscriptionPurchase {
+  subscriptionState?: string;
+  latestOrderId?: string;
+  testPurchase?: unknown;
+  lineItems?: { productId?: string; expiryTime?: string }[];
 }
 
 interface GoogleToken {
@@ -37,6 +48,8 @@ interface AppleTransaction {
   transactionId?: string | number;
   environment?: string;
   revocationDate?: number;
+  originalTransactionId?: string | number;
+  expiresDate?: number;
 }
 
 interface ServiceAccount {
@@ -89,6 +102,42 @@ export class GooglePlayVerifier {
       transactionId: String(body.orderId || purchaseToken),
       productId,
       environment: body.purchaseType === 0 ? 'test' : 'real',
+    };
+  }
+
+  /**
+   * Checks a subscription with purchases.subscriptionsv2. Active, in grace period and
+   * cancelled-but-not-yet-ended subscriptions count until their expiry time.
+   */
+  async verifySubscription(productId: string, purchaseToken: string): Promise<VerifiedPurchase> {
+    if (!this.configured) throw new StoreVerifyError('STORE_NOT_CONFIGURED', 'Google Play purchases are not set up on the server yet');
+    if (!purchaseToken) throw new StoreVerifyError('INVALID_PURCHASE', 'Missing purchase token');
+
+    const access = await this.accessToken();
+    const url = `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${encodeURIComponent(this.packageName)}`
+      + `/purchases/subscriptionsv2/tokens/${encodeURIComponent(purchaseToken)}`;
+    let res: Response;
+    try {
+      res = await this.fetchFn(url, { headers: { Authorization: `Bearer ${access}` } });
+    } catch {
+      throw new StoreVerifyError('STORE_UNAVAILABLE', 'Could not reach Google Play');
+    }
+    if (res.status === 400 || res.status === 404 || res.status === 410) {
+      throw new StoreVerifyError('INVALID_PURCHASE', 'Google Play does not know this subscription');
+    }
+    if (!res.ok) throw new StoreVerifyError('STORE_UNAVAILABLE', `Google Play answered ${res.status}`);
+
+    const body = (await res.json()) as GoogleSubscriptionPurchase;
+    const ok = ['SUBSCRIPTION_STATE_ACTIVE', 'SUBSCRIPTION_STATE_IN_GRACE_PERIOD', 'SUBSCRIPTION_STATE_CANCELED'];
+    if (!ok.includes(body.subscriptionState ?? '')) throw new StoreVerifyError('INVALID_PURCHASE', `Subscription is ${body.subscriptionState ?? 'unknown'}`);
+    const item = (body.lineItems ?? []).find((l) => l.productId === productId);
+    if (!item?.expiryTime) throw new StoreVerifyError('INVALID_PURCHASE', 'Subscription is for another product');
+    return {
+      transactionId: String(body.latestOrderId || purchaseToken),
+      productId,
+      environment: body.testPurchase ? 'test' : 'real',
+      originalId: purchaseToken,
+      expiresAt: new Date(item.expiryTime),
     };
   }
 
@@ -200,6 +249,12 @@ export class AppleVerifier {
     if (payload.revocationDate) throw new StoreVerifyError('INVALID_PURCHASE', 'Purchase was refunded');
     if (!payload.transactionId) throw new StoreVerifyError('INVALID_PURCHASE', 'Purchase has no transaction ID');
 
-    return { transactionId: String(payload.transactionId), productId, environment: String(payload.environment ?? 'Production') };
+    return {
+      transactionId: String(payload.transactionId),
+      productId,
+      environment: String(payload.environment ?? 'Production'),
+      originalId: String(payload.originalTransactionId ?? payload.transactionId),
+      expiresAt: payload.expiresDate ? new Date(payload.expiresDate) : undefined,
+    };
   }
 }
