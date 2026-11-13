@@ -1,6 +1,8 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { MissionRequirement, Prisma } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { onlineSet } from '../../common/presence/presence';
+import { RedisService } from '../../common/redis/redis.service';
 import { S3Service } from '../../common/s3/s3.service';
 import { SocketService } from '../../common/socket/socket.service';
 import { FriendsService } from '../friends/friends.service';
@@ -11,6 +13,8 @@ export const MAX_TEXT_LENGTH = 1000;
 export const MAX_VOICE_SECONDS = 120;
 
 const SENDER_SELECT = { id: true, username: true, avatarUrl: true } as const;
+// The other player in a 1-to-1 chat: also when they were last seen (online is added from Redis).
+const PARTICIPANT_SELECT = { ...SENDER_SELECT, lastSeenAt: true } as const;
 
 @Injectable()
 export class MessagingService {
@@ -20,6 +24,7 @@ export class MessagingService {
     private socketService: SocketService,
     private s3: S3Service,
     private missions: MissionsService,
+    private redis?: RedisService,
   ) {}
 
   async getOrCreateDirectConversation(userId1: string, userId2: string) {
@@ -49,7 +54,7 @@ export class MessagingService {
   async startDirectConversation(userId: string, otherUserId: string) {
     if (userId === otherUserId) throw new BadRequestException('Cannot start a chat with yourself');
 
-    const other = await this.prisma.user.findUnique({ where: { id: otherUserId }, select: SENDER_SELECT });
+    const other = await this.prisma.user.findUnique({ where: { id: otherUserId }, select: PARTICIPANT_SELECT });
     if (!other) throw new NotFoundException('User not found');
 
     const conv = await this.getOrCreateDirectConversation(userId, otherUserId);
@@ -60,7 +65,9 @@ export class MessagingService {
     ]);
 
     const [signed] = await this.withVoiceLinks([lastMessage]);
-    return { id: conv.id, type: conv.type, participant: other, club: null, lastMessage: signed, unreadCount };
+    const online = await onlineSet(this.redis, [other.id]);
+    const participant = { ...other, online: online.has(other.id) };
+    return { id: conv.id, type: conv.type, participant, club: null, lastMessage: signed, unreadCount };
   }
 
   async getClubConversation(clubId: string) {
@@ -73,7 +80,7 @@ export class MessagingService {
       include: {
         members: {
           where: { userId: { not: userId } },
-          include: { user: { select: { id: true, username: true, avatarUrl: true } } },
+          include: { user: { select: PARTICIPANT_SELECT } },
           take: 1,
         },
         messages: { orderBy: { createdAt: 'desc' }, take: 1 },
@@ -101,14 +108,25 @@ export class MessagingService {
       return last && cleared && last.createdAt <= cleared ? null : last;
     }));
 
-    return conversations.map((c, idx) => ({
-      id: c.id,
-      type: c.type,
-      participant: c.type === 'DIRECT' ? c.members[0]?.user : null,
-      club: c.club,
-      lastMessage: lastMessages[idx],
-      unreadCount: unreadCounts[idx],
-    }));
+    const online = await onlineSet(this.redis, conversations.map((c) => c.members[0]?.user?.id).filter((id): id is string => !!id));
+
+    const rows = conversations.map((c, idx) => {
+      const user = c.type === 'DIRECT' ? c.members[0]?.user : null;
+      return {
+        id: c.id,
+        type: c.type,
+        participant: user ? { ...user, online: online.has(user.id) } : null,
+        club: c.club,
+        lastMessage: lastMessages[idx],
+        unreadCount: unreadCounts[idx],
+      };
+    });
+    // Most recent chat first: by its latest visible message, else when it was opened.
+    const activity = (idx: number) => new Date(lastMessages[idx]?.createdAt ?? conversations[idx].createdAt ?? 0).getTime();
+    return rows
+      .map((row, idx) => ({ row, at: activity(idx) }))
+      .sort((a, b) => b.at - a.at)
+      .map((x) => x.row);
   }
 
   async getHistory(conversationId: string, userId: string, page = 1, limit = 50) {

@@ -303,3 +303,39 @@ describe('SocketService.emitToUsers', () => {
     expect(to).not.toHaveBeenCalled();
   });
 });
+
+// The Messages screen shows "Online" / "Last seen" for each chat and lists the most recent
+// chat first, so conversations carry the other player's presence and are sorted by activity.
+describe('MessagingService — conversation list for the Messages screen', () => {
+  const at = (s: string) => new Date(s);
+  function withRedis(onlineIds: string[]) {
+    const ctx = setup();
+    const redis = { mget: jest.fn(async (keys: string[]) => keys.map((k) => (onlineIds.includes(k.slice(7)) ? '1' : null))) };
+    const service = new MessagingService(ctx.prisma as any, ctx.friends as any, ctx.socket, ctx.s3 as any, ctx.missions as any, redis as any);
+    return { ...ctx, service };
+  }
+
+  it('adds online + lastSeenAt to the participant and sorts by latest message', async () => {
+    const { service, prisma } = withRedis([BOB]);
+    const older = { id: 'c-old', type: 'DIRECT', createdAt: at('2026-01-01'), club: null,
+      members: [{ user: { id: BOB, username: 'bob', avatarUrl: null, lastSeenAt: at('2026-01-02') } }],
+      messages: [{ id: 'm-old', createdAt: at('2026-01-03'), voiceUrl: null }] };
+    const newer = { id: 'c-new', type: 'DIRECT', createdAt: at('2025-12-01'), club: null,
+      members: [{ user: { id: MALLORY, username: 'mal', avatarUrl: null, lastSeenAt: null } }],
+      messages: [{ id: 'm-new', createdAt: at('2026-02-01'), voiceUrl: null }] };
+    (prisma.conversation as any).findMany = jest.fn(async () => [older, newer]);
+
+    const rows: any[] = await service.getConversations(ALICE);
+
+    expect(rows.map((r) => r.id)).toEqual(['c-new', 'c-old']);
+    expect(rows[1].participant).toMatchObject({ id: BOB, online: true, lastSeenAt: at('2026-01-02') });
+    expect(rows[0].participant).toMatchObject({ id: MALLORY, online: false });
+    expect(rows[0]).not.toHaveProperty('activityAt');
+  });
+
+  it('opening a chat returns the other player with their online flag', async () => {
+    const { service } = withRedis([BOB]);
+    const row: any = await service.startDirectConversation(ALICE, BOB);
+    expect(row.participant).toMatchObject({ id: BOB, online: true });
+  });
+});
