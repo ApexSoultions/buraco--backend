@@ -3,6 +3,16 @@ export default () => ({
   nodeEnv: process.env.NODE_ENV || 'development',
   appUrl: process.env.APP_URL || 'http://localhost:3000',
 
+  // Real-money purchases (coin packs). Google needs the client's Play Console service
+  // account key; Apple only needs the bundle ID (transactions are signed by Apple).
+  iap: {
+    googlePackageName: process.env.GOOGLE_PLAY_PACKAGE_NAME || 'com.DevGene.BarasilianCardsGame',
+    googleServiceAccount: process.env.GOOGLE_PLAY_SERVICE_ACCOUNT || '',
+    appleBundleId: process.env.APPLE_BUNDLE_ID || 'com.barasilliancardsgame.devgene',
+    appleRootSha256: process.env.APPLE_ROOT_CA_G3_SHA256 || '',
+    allowFake: process.env.IAP_ALLOW_FAKE === 'true',
+  },
+
   database: {
     url: process.env.DATABASE_URL,
   },

@@ -24,6 +24,7 @@ import { FriendsModule } from './modules/friends/friends.module';
 import { ClubsModule } from './modules/clubs/clubs.module';
 import { RankingsModule } from './modules/rankings/rankings.module';
 import { ShopModule } from './modules/shop/shop.module';
+import { IapModule } from './modules/iap/iap.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { MatchmakingModule } from './modules/matchmaking/matchmaking.module';
 import { RoomsModule } from './modules/rooms/rooms.module';
@@ -75,6 +76,7 @@ import { AppGateway } from './websocket/gateway';
     ClubsModule,
     RankingsModule,
     ShopModule,
+    IapModule,
     NotificationsModule,
     MatchmakingModule,
     RoomsModule,

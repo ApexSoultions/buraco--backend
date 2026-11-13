@@ -81,6 +81,7 @@ enum TransactionType {
   MANUAL_CREDIT
   MANUAL_DEDUCT
   SUBSCRIPTION
+  IAP_PURCHASE
 }
 
 enum MissionType {
@@ -140,11 +141,9 @@ enum GameStatus {
 
 /**
  * Who owns the authoritative match state.
- *
  * SERVER — this backend hosts the match: it deals, validates every move, runs turns/timers
  * and the auto-play AI from a cron, and keeps the state in Redis. The match continues even
  * when no player is connected. Only SERVER games are picked up by the cron.
- *
  * FUSION — legacy player-hosted (Photon Fusion) matches, whose outcome arrived via
  * POST /v1/game/:gameId/report-result. Never processed by the cron; kept only so historical
  * rows and their reports stay readable.
@@ -174,33 +173,33 @@ enum AdminRole {
 // ─────────────────────────────────────────────
 
 model User {
-  id                  String             @id @default(uuid())
-  email               String?            @unique
-  passwordHash        String?
-  googleId            String?            @unique
-  appleId             String?            @unique
-  username            String             @unique
-  avatarUrl           String?
-  registrationDate    DateTime           @default(now())
-  coins               Int                @default(1000)
-  diamonds            Int                @default(0)
-  lives               Int                @default(5)
-  subscriptionStatus  SubscriptionStatus @default(FREE)
-  subscriptionExpiry  DateTime?
-  isBanned            Boolean            @default(false)
-  banReason           String?
-  isDeleted           Boolean            @default(false)
-  deletedAt           DateTime?
-  lastSeenAt          DateTime?
-  fcmToken            String?
-  createdAt           DateTime           @default(now())
-  updatedAt           DateTime           @updatedAt
+  id                 String             @id @default(uuid())
+  email              String?            @unique
+  passwordHash       String?
+  googleId           String?            @unique
+  appleId            String?            @unique
+  username           String             @unique
+  avatarUrl          String?
+  registrationDate   DateTime           @default(now())
+  coins              Int                @default(1000)
+  diamonds           Int                @default(0)
+  lives              Int                @default(5)
+  subscriptionStatus SubscriptionStatus @default(FREE)
+  subscriptionExpiry DateTime?
+  isBanned           Boolean            @default(false)
+  banReason          String?
+  isDeleted          Boolean            @default(false)
+  deletedAt          DateTime?
+  lastSeenAt         DateTime?
+  fcmToken           String?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
 
   stats               PlayerStats?
-  sentFriendships     Friendship[]       @relation("SentFriendships")
-  receivedFriendships Friendship[]       @relation("ReceivedFriendships")
-  blocksGiven         Block[]            @relation("BlocksGiven")
-  blocksReceived      Block[]            @relation("BlocksReceived")
+  sentFriendships     Friendship[]         @relation("SentFriendships")
+  receivedFriendships Friendship[]         @relation("ReceivedFriendships")
+  blocksGiven         Block[]              @relation("BlocksGiven")
+  blocksReceived      Block[]              @relation("BlocksReceived")
   clubMemberships     ClubMember[]
   transactions        Transaction[]
   missionProgress     MissionProgress[]
@@ -212,8 +211,9 @@ model User {
   adminNotes          AdminNote[]
   conversationMembers ConversationMember[]
   messages            Message[]
-  reportsMade         Report[]           @relation("ReportsMade")
-  reportsReceived     Report[]           @relation("ReportsReceived")
+  reportsMade         Report[]             @relation("ReportsMade")
+  reportsReceived     Report[]             @relation("ReportsReceived")
+  iapPurchases        IapPurchase[]
 
   @@map("users")
 }
@@ -565,17 +565,17 @@ model MatchmakingEntry {
 // ─────────────────────────────────────────────
 
 model Room {
-  id             String      @id @default(uuid())
-  mode           GameMode
-  variant        GameVariant
-  status         RoomStatus  @default(EMPTY)
-  maxPlayers     Int
-  currentPlayers Int         @default(0)
-  turnDuration   Int         @default(30)
-  minLevel       Int?
-  minPoints      Int?
-  entryFeeCoins  Int         @default(0)
-  gameId         String?     @unique
+  id                 String      @id @default(uuid())
+  mode               GameMode
+  variant            GameVariant
+  status             RoomStatus  @default(EMPTY)
+  maxPlayers         Int
+  currentPlayers     Int         @default(0)
+  turnDuration       Int         @default(30)
+  minLevel           Int?
+  minPoints          Int?
+  entryFeeCoins      Int         @default(0)
+  gameId             String?     @unique
   endMode            String?
   makart             Boolean     @default(false)
   targetScore        Int         @default(0)
@@ -584,7 +584,7 @@ model Room {
   tableOwnerUserId   String?
   tableOwnerUsername String?
   createdAt          DateTime    @default(now())
-  updatedAt      DateTime    @updatedAt
+  updatedAt          DateTime    @updatedAt
 
   game GameSession? @relation(fields: [gameId], references: [id])
 
@@ -631,7 +631,6 @@ model GameSession {
  * device via POST /v1/game/:gameId/report-result. In-match play no longer runs on this
  * server, so this row IS the durable record of "the match is over": a player who was
  * offline at match end learns the outcome by polling GET /v1/game/:gameId/result.
- *
  * `gameId` is unique — the first report wins and later ones (client retries, or the
  * other device after a host migration) are accepted but never overwrite it.
  * `payload` stores the reporter's body verbatim so GET /result can return it unchanged.
@@ -768,4 +767,22 @@ model SystemConfig {
   updatedBy String?
 
   @@map("system_config")
+}
+
+/// A real-money store purchase, verified with Google Play / the App Store. One row per store
+/// transaction: the unique key stops the same purchase from being credited twice.
+model IapPurchase {
+  id            String   @id @default(uuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id])
+  store         String // GOOGLE_PLAY, APPLE, FAKE (editor testing, never in production)
+  productId     String
+  transactionId String
+  coins         Int
+  environment   String? // Apple: Sandbox / Production; Google: test / real
+  createdAt     DateTime @default(now())
+
+  @@unique([store, transactionId])
+  @@index([userId])
+  @@map("iap_purchases")
 }
