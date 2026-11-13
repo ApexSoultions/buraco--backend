@@ -137,10 +137,10 @@ async function main() {
     { name: 'Classic Blue Deck', description: 'Default classic card deck', category: ShopCategory.CARDS, priceCoins: 500, isConsumable: false },
     { name: 'Gold Foil Deck', description: 'Premium gold foil card design', category: ShopCategory.CARDS, priceDiamonds: 30, isConsumable: false },
     { name: 'Night Sky Deck', description: 'Dark themed starfield card deck', category: ShopCategory.CARDS, priceDiamonds: 25, isConsumable: false },
-    // Tables
-    { name: 'Classic Green Table', description: 'Standard green felt table', category: ShopCategory.TABLES, priceCoins: 1000, isConsumable: false },
-    { name: 'Marble Table', description: 'Elegant marble surface table', category: ShopCategory.TABLES, priceDiamonds: 40, isConsumable: false },
-    { name: 'Beach Table', description: 'Casual beach-themed table', category: ShopCategory.TABLES, priceDiamonds: 20, isConsumable: false },
+    // Tables (Figma "Tables Colors")
+    { name: 'Maroon', description: 'Maroon table colour', category: ShopCategory.TABLES, priceCoins: 7000, isConsumable: false, sortOrder: 1 },
+    { name: 'Green', description: 'Green table colour', category: ShopCategory.TABLES, priceCoins: 7000, isConsumable: false, sortOrder: 2 },
+    { name: 'Blue', description: 'Blue table colour', category: ShopCategory.TABLES, priceCoins: 7000, isConsumable: false, sortOrder: 3 },
     // Emojis
     { name: 'Basic Emoji Pack', description: '10 standard in-game emojis', category: ShopCategory.EMOJIS, priceCoins: 300, isConsumable: false },
     { name: 'Animated Emoji Pack', description: '5 animated emojis', category: ShopCategory.EMOJIS, priceDiamonds: 15, isConsumable: false },
@@ -154,6 +154,7 @@ async function main() {
     { name: '15 Lives', description: 'Cost per life: 600 coins', category: ShopCategory.LIVES, priceCoins: 9000, grantLives: 15, isConsumable: true, sortOrder: 4 },
     { name: '10 Lives', description: 'Cost per life: 800 coins', category: ShopCategory.LIVES, priceCoins: 8000, grantLives: 10, isConsumable: true, sortOrder: 5 },
     { name: '5 Lives', description: 'Cost per life: 1200 coins', category: ShopCategory.LIVES, priceCoins: 6000, grantLives: 5, isConsumable: true, sortOrder: 6 },
+    { name: '3 Lives', description: 'Cost per life: 1666 coins', category: ShopCategory.LIVES, priceCoins: 5000, grantLives: 3, isConsumable: true, sortOrder: 7 },
   ];
 
   for (const item of shopItems) {
