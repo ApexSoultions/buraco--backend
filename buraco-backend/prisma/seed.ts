@@ -147,6 +147,13 @@ async function main() {
     // Special
     { name: 'Double XP (1 day)', description: 'Earn double XP for 24 hours', category: ShopCategory.SPECIAL, priceDiamonds: 10, isConsumable: true },
     { name: 'Name Change Token', description: 'Change your username once', category: ShopCategory.SPECIAL, priceDiamonds: 20, isConsumable: true },
+    // Lives (Figma "lives to buy": price = lives x cost per life)
+    { name: '100 Lives', description: 'Cost per life: 200 coins', category: ShopCategory.LIVES, priceCoins: 20000, grantLives: 100, isConsumable: true, sortOrder: 1 },
+    { name: '50 Lives', description: 'Cost per life: 300 coins', category: ShopCategory.LIVES, priceCoins: 15000, grantLives: 50, isConsumable: true, sortOrder: 2 },
+    { name: '25 Lives', description: 'Cost per life: 450 coins', category: ShopCategory.LIVES, priceCoins: 11250, grantLives: 25, isConsumable: true, sortOrder: 3 },
+    { name: '15 Lives', description: 'Cost per life: 600 coins', category: ShopCategory.LIVES, priceCoins: 9000, grantLives: 15, isConsumable: true, sortOrder: 4 },
+    { name: '10 Lives', description: 'Cost per life: 800 coins', category: ShopCategory.LIVES, priceCoins: 8000, grantLives: 10, isConsumable: true, sortOrder: 5 },
+    { name: '5 Lives', description: 'Cost per life: 1200 coins', category: ShopCategory.LIVES, priceCoins: 6000, grantLives: 5, isConsumable: true, sortOrder: 6 },
   ];
 
   for (const item of shopItems) {

@@ -62,6 +62,7 @@ enum ShopCategory {
   CARDS
   SPECIAL
   REDEEM
+  LIVES
 }
 
 enum CurrencyType {
@@ -483,6 +484,10 @@ model ShopItem {
   imageUrl      String?
   isActive      Boolean      @default(true)
   isConsumable  Boolean      @default(false)
+  /// Lives added to the player on each purchase (LIVES packs).
+  grantLives    Int?
+  /// Order in the shop (lower first), so packs show as in Figma.
+  sortOrder     Int          @default(0)
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
 
