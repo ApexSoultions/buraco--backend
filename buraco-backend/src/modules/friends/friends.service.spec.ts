@@ -99,10 +99,25 @@ describe('FriendsService.blockUser', () => {
   });
 
   it('blocks and ends any friendship or request between the two', async () => {
-    const prisma = { user: { findUnique: jest.fn(async () => ({ id: 'them' })) }, block: { upsert: jest.fn(async () => ({})) }, friendship: { deleteMany: jest.fn(async () => ({ count: 1 })) } };
+    const prisma = {
+      user: { findUnique: jest.fn(async () => ({ id: 'them', blockLimit: 50 })) },
+      block: { upsert: jest.fn(async () => ({})), findUnique: jest.fn(async () => null), count: jest.fn(async () => 3) },
+      friendship: { deleteMany: jest.fn(async () => ({ count: 1 })) },
+    };
     const service = new FriendsService(prisma as any, {} as any);
     await service.blockUser('me', 'them');
     expect(prisma.block.upsert).toHaveBeenCalled();
     expect(prisma.friendship.deleteMany).toHaveBeenCalled();
+  });
+
+  it('refuses a new block when the black list is full (Special Features adds room)', async () => {
+    const prisma = {
+      user: { findUnique: jest.fn(async () => ({ id: 'them', blockLimit: 50 })) },
+      block: { upsert: jest.fn(), findUnique: jest.fn(async () => null), count: jest.fn(async () => 50) },
+      friendship: { deleteMany: jest.fn() },
+    };
+    const service = new FriendsService(prisma as any, {} as any);
+    await expect(service.blockUser('me', 'them')).rejects.toThrow('BLOCK_LIST_FULL');
+    expect(prisma.block.upsert).not.toHaveBeenCalled();
   });
 });

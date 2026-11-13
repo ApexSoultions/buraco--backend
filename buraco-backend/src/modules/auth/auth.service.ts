@@ -330,7 +330,9 @@ export class AuthService {
   }
 
   private async generateUsername(base: string): Promise<string> {
-    const clean = base.replace(/[^a-zA-Z0-9_]/g, '').toLowerCase().slice(0, 15) || 'player';
+    let clean = base.replace(/[^a-zA-Z0-9_]/g, '').toLowerCase().slice(0, 15) || 'player';
+    // Names of 1–3 characters are sold in Special Features; generated names are 4+.
+    if (clean.length < 4) clean = `${clean}${Math.floor(Math.random() * 9000 + 1000)}`;
     let candidate = clean;
     let attempt = 0;
     while (await this.prisma.user.findUnique({ where: { username: candidate } })) {

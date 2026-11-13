@@ -85,6 +85,15 @@ export class FriendsService {
     const target = await this.prisma.user.findUnique({ where: { id: targetId }, select: { id: true } });
     if (!target) throw new NotFoundException('User not found');
 
+    // The black list has a size (Special Features "+10 Black List" adds 10).
+    const already = await this.prisma.block.findUnique({ where: { blockerId_blockedId: { blockerId: userId, blockedId: targetId } }, select: { id: true } });
+    if (!already) {
+      const [me, count] = await Promise.all([
+        this.prisma.user.findUnique({ where: { id: userId }, select: { blockLimit: true } }),
+        this.prisma.block.count({ where: { blockerId: userId } }),
+      ]);
+      if (count >= (me?.blockLimit ?? 50)) throw new BadRequestException('BLOCK_LIST_FULL');
+    }
     await this.prisma.block.upsert({
       where: { blockerId_blockedId: { blockerId: userId, blockedId: targetId } },
       create: { blockerId: userId, blockedId: targetId },

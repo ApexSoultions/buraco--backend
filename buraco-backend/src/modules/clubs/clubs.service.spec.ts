@@ -19,7 +19,7 @@ const PLAYER = 'd4444444-4444-4444-8444-444444444444';
 type Member = { clubId: string; userId: string; role: ClubRole; status: MemberStatus; joinedAt: Date };
 
 function setup(opts: { type?: ClubType; extraMembers?: Member[]; points?: number; level?: number } = {}) {
-  const club = { id: CLUB, name: 'Aces', type: opts.type ?? ClubType.OPEN, minPoints: 0, points: opts.points ?? 0, level: opts.level ?? 1, memberCount: 2 };
+  const club = { id: CLUB, name: 'Aces', type: opts.type ?? ClubType.OPEN, minPoints: 0, points: opts.points ?? 0, level: opts.level ?? 1, memberCount: 2, maxMembers: (opts as any).maxMembers ?? 30 };
   const members: Member[] = [
     { clubId: CLUB, userId: LEADER, role: ClubRole.LEADER, status: MemberStatus.ACTIVE, joinedAt: new Date() },
     { clubId: CLUB, userId: VICE, role: ClubRole.VICE_LEADER, status: MemberStatus.ACTIVE, joinedAt: new Date() },
@@ -46,6 +46,12 @@ function setup(opts: { type?: ClubType; extraMembers?: Member[]; points?: number
         return { ...club };
       }),
       updateMany: jest.fn(async ({ where, data }: any) => {
+        // Taking a seat: only while memberCount < maxMembers.
+        if (where.memberCount?.lt !== undefined) {
+          if (!(club.memberCount < where.memberCount.lt)) return { count: 0 };
+          club.memberCount += data.memberCount.increment;
+          return { count: 1 };
+        }
         if (!(club.level < where.level.lt)) return { count: 0 };
         club.level = data.level;
         return { count: 1 };
@@ -295,3 +301,11 @@ describe('ClubsService — points and levels', () => {
     expect(service.levelProgress(2350)).toEqual({ pointsPerLevel: 1000, pointsInLevel: 350, pointsToNextLevel: 650, progressToNextLevel: 35 });
   });
 });
+
+describe('ClubsService — seats', () => {
+  it('a full club refuses new members (Special Features adds seats)', async () => {
+    const { service } = setup({ maxMembers: 2 } as any);
+    await expect(service.joinClub(PLAYER, CLUB)).rejects.toThrow('CLUB_FULL');
+  });
+});
+

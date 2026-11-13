@@ -53,8 +53,9 @@ export class ClubsService {
   async updateClub(userId: string, clubId: string, dto: UpdateClubDto) {
     await this.requireRole(userId, clubId, [ClubRole.LEADER]);
     if (dto.name) {
-      const taken = await this.prisma.club.findUnique({ where: { name: dto.name }, select: { id: true } });
-      if (taken && taken.id !== clubId) throw new ConflictException('CLUB_NAME_TAKEN');
+      // Renaming a club is a paid Special Feature (POST /special/clubs/:clubId/name).
+      const club = await this.prisma.club.findUnique({ where: { id: clubId }, select: { name: true } });
+      if (club && club.name !== dto.name) throw new BadRequestException('CLUB_RENAME_IN_SPECIAL_FEATURES');
     }
     return this.prisma.club.update({ where: { id: clubId }, data: dto });
   }
@@ -99,12 +100,12 @@ export class ClubsService {
     if (stats && stats.points < club.minPoints) throw new BadRequestException('INSUFFICIENT_POINTS');
 
     await this.prisma.$transaction(async (tx) => {
+      await this.takeSeat(tx, clubId);
       await tx.clubMember.upsert({
         where: { clubId_userId: { clubId, userId } },
         create: { clubId, userId, role: ClubRole.MEMBER, status: MemberStatus.ACTIVE },
         update: { status: MemberStatus.ACTIVE, role: ClubRole.MEMBER },
       });
-      await tx.club.update({ where: { id: clubId }, data: { memberCount: { increment: 1 } } });
       await this.addToClubChat(tx, clubId, userId);
     });
 
@@ -140,8 +141,8 @@ export class ClubsService {
       // They may have joined another club while this request was waiting.
       await this.assertNotInAnyClub(memberId);
       await this.prisma.$transaction(async (tx) => {
+        await this.takeSeat(tx, clubId);
         await tx.clubMember.update({ where: { clubId_userId: { clubId, userId: memberId } }, data: { status: MemberStatus.ACTIVE } });
-        await tx.club.update({ where: { id: clubId }, data: { memberCount: { increment: 1 } } });
         await this.addToClubChat(tx, clubId, memberId);
       });
       await this.missions.updateProgressSafely(memberId, MissionRequirement.JOIN_CLUB);
@@ -327,6 +328,20 @@ export class ClubsService {
   }
 
   /** One active club per player. */
+  /**
+   * Counts a new member in, only while the club has a free seat (maxMembers; Special Features
+   * "+10 Clan Member" adds seats). In the same transaction as the join, so two joins at once
+   * can't both take the last seat.
+   */
+  private async takeSeat(tx: Tx, clubId: string) {
+    const club = await tx.club.findUnique({ where: { id: clubId }, select: { maxMembers: true } });
+    const seated = await tx.club.updateMany({
+      where: { id: clubId, memberCount: { lt: club?.maxMembers ?? 0 } },
+      data: { memberCount: { increment: 1 } },
+    });
+    if (seated.count === 0) throw new BadRequestException('CLUB_FULL');
+  }
+
   private async assertNotInAnyClub(userId: string) {
     const active = await this.prisma.clubMember.findFirst({ where: { userId, status: MemberStatus.ACTIVE }, select: { id: true } });
     if (active) throw new BadRequestException('ALREADY_IN_CLUB');

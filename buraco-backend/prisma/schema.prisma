@@ -188,6 +188,8 @@ model User {
   subscriptionExpiry DateTime?
   /// Voice chat subscription ("Voice chat" plans): active until this time.
   voiceChatExpiry    DateTime?
+  /// How many players this player can block (Special Features "+10 Black List" adds 10).
+  blockLimit         Int                @default(50)
   isBanned           Boolean            @default(false)
   banReason          String?
   isDeleted          Boolean            @default(false)
@@ -326,6 +328,8 @@ model Club {
   level          Int      @default(1)
   points         Int      @default(0)
   memberCount    Int      @default(0)
+  /// Seats in the club (Special Features "+10 Clan Member" adds 10).
+  maxMembers     Int      @default(30)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 

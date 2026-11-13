@@ -7,6 +7,7 @@ import {
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { ProfileService, SEARCH_MAX_RESULTS, SEARCH_MIN_CHARS } from './profile.service';
+import { SpecialService } from '../special/special.service';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 
 @ApiTags('Profile')
@@ -14,7 +15,7 @@ import { UpdateProfileDto } from './dto/update-profile.dto';
 @UseGuards(JwtAuthGuard)
 @Controller('profile')
 export class ProfileController {
-  constructor(private readonly profileService: ProfileService) {}
+  constructor(private readonly profileService: ProfileService, private readonly special: SpecialService) {}
 
   @Get('me')
   @ApiOperation({ summary: 'Get own full profile with stats' })
@@ -55,12 +56,13 @@ export class ProfileController {
   }
 
   @Put('username')
-  @ApiOperation({ summary: 'Update own username' })
+  @ApiOperation({ summary: 'Change own username (4–20 characters) for the rename price (1,000 coins)' })
   @ApiResponse({ status: 200, description: 'Username updated' })
   @ApiResponse({ status: 400, description: 'Invalid username format' })
   @ApiResponse({ status: 409, description: 'Username already taken' })
   updateUsername(@CurrentUser('id') userId: string, @Body() dto: UpdateProfileDto) {
-    return this.profileService.updateUsername(userId, dto.username!);
+    // Every rename costs the Special Features "Change Your Name" price.
+    return this.special.rename(userId, dto.username!);
   }
 
   @Post('avatar/upload')
