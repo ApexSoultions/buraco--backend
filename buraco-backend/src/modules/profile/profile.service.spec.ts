@@ -118,3 +118,33 @@ describe('ProfileService predefined avatars', () => {
     expect(list[0].url).toBe('http://host/avatars/predefined/001.png');
   });
 });
+
+describe('ProfileService.getPublicProfile', () => {
+  const base = {
+    id: 'them', username: 'them', avatarUrl: null, registrationDate: new Date('2026-01-02'), lastSeenAt: null,
+    subscriptionStatus: 'FREE', stats: { level: 3, wins: 5, losses: 2 }, clubMemberships: [],
+  };
+  function setup(link: any, blocks: any[]) {
+    const prisma = {
+      user: { findUnique: jest.fn(async () => base) },
+      friendship: { findFirst: jest.fn(async () => link) },
+      block: { findMany: jest.fn(async () => blocks) },
+    };
+    return new ProfileService(prisma as any, {} as any, {} as any, { mget: jest.fn(async () => ['1']) } as any);
+  }
+
+  it('says how the viewer is connected, and whether they are online', async () => {
+    const p: any = await setup({ id: 'req1', senderId: 'them', status: 'PENDING' }, []).getPublicProfile('them', 'me');
+    expect(p).toEqual(expect.objectContaining({ relation: 'REQUEST_RECEIVED', requestId: 'req1', online: true, isMe: false, blockedByMe: false }));
+    expect(p.subscriptionStatus).toBeUndefined();
+  });
+
+  it('shows "blocked by me" for players the viewer blocked', async () => {
+    const p: any = await setup(null, [{ blockerId: 'me' }]).getPublicProfile('them', 'me');
+    expect(p.blockedByMe).toBe(true);
+  });
+
+  it('hides a player who has blocked the viewer', async () => {
+    await expect(setup(null, [{ blockerId: 'them' }]).getPublicProfile('them', 'me')).rejects.toThrow('User not found');
+  });
+});

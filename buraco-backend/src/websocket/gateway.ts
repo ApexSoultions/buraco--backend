@@ -1,3 +1,4 @@
+import { PrismaService } from '../common/prisma/prisma.service';
 import {
   ConnectedSocket,
   MessageBody,
@@ -44,6 +45,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     private reconnection: ReconnectionService,
     private roomsService: RoomsService,
     private socketService: SocketService,
+    private prisma: PrismaService,
   ) {}
 
   afterInit(server: Server) {
@@ -83,6 +85,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
       socket.join(userRoom(payload.sub));
       this.userSockets.set(payload.sub, socket.id);
       await this.redis.set(`online:${payload.sub}`, '1', 30);
+      this.touchLastSeen(payload.sub);
       this.logger.log(`User ${payload.sub} connected: ${socket.id}`);
       socket.emit('connect_ack', { userId: payload.sub, socketId: socket.id });
 
@@ -103,6 +106,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     if (!userId) return;
     this.userSockets.delete(userId);
     await this.redis.del(`online:${userId}`);
+    this.touchLastSeen(userId);
     this.logger.log(`User ${userId} disconnected`);
 
     // In-game disconnect: flag the player as away and tell the table.
@@ -673,6 +677,13 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
   }
 
   // Notifications are delivered by NotificationsService through the `user:<id>` rooms.
+
+  /** 'Last seen' for friends lists and profiles; never blocks or fails the socket event. */
+  private touchLastSeen(userId: string) {
+    this.prisma.user
+      .update({ where: { id: userId }, data: { lastSeenAt: new Date() } })
+      .catch((err) => this.logger.warn(`lastSeenAt update failed for ${userId}: ${(err as Error).message}`));
+  }
 
   isUserOnline(userId: string): boolean {
     return this.userSockets.has(userId);

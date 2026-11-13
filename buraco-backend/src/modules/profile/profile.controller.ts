@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Put, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Put, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import {
   ApiBearerAuth, ApiBody, ApiConsumes, ApiOperation,
@@ -50,8 +50,8 @@ export class ProfileController {
   @ApiResponse({ status: 200, description: 'Public profile returned' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({ status: 404, description: 'Player not found' })
-  getPublicProfile(@Param('userId') userId: string) {
-    return this.profileService.getPublicProfile(userId);
+  getPublicProfile(@CurrentUser('id') viewerId: string, @Param('userId', new ParseUUIDPipe()) userId: string) {
+    return this.profileService.getPublicProfile(userId, viewerId);
   }
 
   @Put('username')

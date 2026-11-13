@@ -69,3 +69,40 @@ describe('FriendsService notifications', () => {
     expect(req.id).toBe('f-old');
   });
 });
+
+describe('FriendsService.getFriends — online first', () => {
+  it('marks who is online and lists them before offline friends, then by name', async () => {
+    const card = (id: string, username: string) => ({ id, username, avatarUrl: null, lastSeenAt: null, stats: { level: 1 } });
+    const prisma = {
+      friendship: {
+        findMany: jest.fn(async () => [
+          { id: 'f1', senderId: 'me', receiverId: 'zed', updatedAt: new Date(), sender: card('me', 'me'), receiver: card('zed', 'zed') },
+          { id: 'f2', senderId: 'amy', receiverId: 'me', updatedAt: new Date(), sender: card('amy', 'amy'), receiver: card('me', 'me') },
+          { id: 'f3', senderId: 'me', receiverId: 'bob', updatedAt: new Date(), sender: card('me', 'me'), receiver: card('bob', 'bob') },
+        ]),
+      },
+    };
+    const redis = { mget: jest.fn(async (keys: string[]) => keys.map((k) => (k === 'online:zed' ? '1' : null))) };
+    const service = new FriendsService(prisma as any, {} as any, redis as any);
+
+    const list = await service.getFriends('me');
+    expect(list.map((f) => [f.user.username, f.user.online])).toEqual([['zed', true], ['amy', false], ['bob', false]]);
+  });
+});
+
+describe('FriendsService.blockUser', () => {
+  it('returns 404 for a player that does not exist (not a 500 from the database)', async () => {
+    const prisma = { user: { findUnique: jest.fn(async () => null) }, block: { upsert: jest.fn() }, friendship: { deleteMany: jest.fn() } };
+    const service = new FriendsService(prisma as any, {} as any);
+    await expect(service.blockUser('me', '00000000-0000-4000-8000-000000000000')).rejects.toThrow('User not found');
+    expect(prisma.block.upsert).not.toHaveBeenCalled();
+  });
+
+  it('blocks and ends any friendship or request between the two', async () => {
+    const prisma = { user: { findUnique: jest.fn(async () => ({ id: 'them' })) }, block: { upsert: jest.fn(async () => ({})) }, friendship: { deleteMany: jest.fn(async () => ({ count: 1 })) } };
+    const service = new FriendsService(prisma as any, {} as any);
+    await service.blockUser('me', 'them');
+    expect(prisma.block.upsert).toHaveBeenCalled();
+    expect(prisma.friendship.deleteMany).toHaveBeenCalled();
+  });
+});

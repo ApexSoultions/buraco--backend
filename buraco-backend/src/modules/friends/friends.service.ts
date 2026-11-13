@@ -2,12 +2,17 @@ import { BadRequestException, ConflictException, ForbiddenException, Injectable,
 import { FriendshipStatus, NotificationType } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { RedisService } from '../../common/redis/redis.service';
+import { onlineSet } from '../../common/presence/presence';
+
+const PLAYER_CARD = { id: true, username: true, avatarUrl: true, lastSeenAt: true, stats: { select: { level: true } } } as const;
 
 @Injectable()
 export class FriendsService {
   constructor(
     private prisma: PrismaService,
     private notifications: NotificationsService,
+    private redis?: RedisService,
   ) {}
 
   async sendRequest(senderId: string, receiverId: string) {
@@ -76,6 +81,9 @@ export class FriendsService {
 
   async blockUser(userId: string, targetId: string) {
     if (userId === targetId) throw new BadRequestException('Cannot block yourself');
+    // An unknown id would otherwise fail on the foreign key as a 500.
+    const target = await this.prisma.user.findUnique({ where: { id: targetId }, select: { id: true } });
+    if (!target) throw new NotFoundException('User not found');
 
     await this.prisma.block.upsert({
       where: { blockerId_blockedId: { blockerId: userId, blockedId: targetId } },
@@ -99,29 +107,34 @@ export class FriendsService {
         status: FriendshipStatus.ACCEPTED,
         OR: [{ senderId: userId }, { receiverId: userId }],
       },
-      include: {
-        sender: { select: { id: true, username: true, avatarUrl: true, stats: { select: { level: true } } } },
-        receiver: { select: { id: true, username: true, avatarUrl: true, stats: { select: { level: true } } } },
-      },
+      include: { sender: { select: PLAYER_CARD }, receiver: { select: PLAYER_CARD } },
     });
 
-    return friendships.map((f) => ({
+    const friends = friendships.map((f) => ({
       friendshipId: f.id,
+      since: f.updatedAt,
       user: f.senderId === userId ? f.receiver : f.sender,
     }));
+    // Online friends first, then by name — the list the Friends screen shows.
+    const online = await onlineSet(this.redis, friends.map((f) => f.user.id));
+    return friends
+      .map((f) => ({ ...f, user: { ...f.user, online: online.has(f.user.id) } }))
+      .sort((a, b) => Number(b.user.online) - Number(a.user.online) || a.user.username.localeCompare(b.user.username));
   }
 
   async getPendingRequests(userId: string) {
     return this.prisma.friendship.findMany({
       where: { receiverId: userId, status: FriendshipStatus.PENDING },
-      include: { sender: { select: { id: true, username: true, avatarUrl: true, stats: { select: { level: true } } } } },
+      include: { sender: { select: PLAYER_CARD } },
+      orderBy: { createdAt: 'desc' },
     });
   }
 
   async getSentRequests(userId: string) {
     return this.prisma.friendship.findMany({
       where: { senderId: userId, status: FriendshipStatus.PENDING },
-      include: { receiver: { select: { id: true, username: true, avatarUrl: true, stats: { select: { level: true } } } } },
+      include: { receiver: { select: PLAYER_CARD } },
+      orderBy: { createdAt: 'desc' },
     });
   }
 
@@ -129,6 +142,7 @@ export class FriendsService {
     return this.prisma.block.findMany({
       where: { blockerId: userId },
       include: { blocked: { select: { id: true, username: true, avatarUrl: true } } },
+      orderBy: { createdAt: 'desc' },
     });
   }
 

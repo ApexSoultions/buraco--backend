@@ -3,6 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { SystemConfigService } from '../../common/system-config/system-config.service';
+import { RedisService } from '../../common/redis/redis.service';
+import { onlineSet } from '../../common/presence/presence';
 import { v4 as uuidv4 } from 'uuid';
 import { existsSync } from 'fs';
 import { join } from 'path';
@@ -31,6 +33,7 @@ export class ProfileService {
     private prisma: PrismaService,
     private config: ConfigService,
     private sysConfig: SystemConfigService,
+    private redis?: RedisService,
   ) {}
 
   private async getS3Client() {
@@ -53,14 +56,27 @@ export class ProfileService {
     return safe;
   }
 
-  async getPublicProfile(userId: string) {
+  /**
+   * Another player's profile card (the player popup). With `viewerId`, it also says how the
+   * viewer is connected to them (friend, request either way, blocked by the viewer). A player
+   * who has blocked the viewer is not shown (404), the same as everywhere else.
+   */
+  async getPublicProfile(userId: string, viewerId?: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId, isDeleted: false },
       select: {
         id: true,
         username: true,
         avatarUrl: true,
-        stats: { select: { level: true, points: true, gamesPlayed: true, winPercentage: true, winStreak: true } },
+        registrationDate: true,
+        lastSeenAt: true,
+        subscriptionStatus: true,
+        stats: {
+          select: {
+            level: true, points: true, classicPoints: true, gamesPlayed: true, wins: true, losses: true,
+            gamesLeft: true, winPercentage: true, winStreak: true, bestWinStreak: true,
+          },
+        },
         clubMemberships: {
           where: { status: 'ACTIVE' },
           select: { role: true, club: { select: { id: true, name: true, iconUrl: true } } },
@@ -70,11 +86,42 @@ export class ProfileService {
     });
     if (!user) throw new NotFoundException('User not found');
 
+    let relation: SearchRelation = 'NONE';
+    let requestId: string | null = null;
+    let blockedByMe = false;
+    if (viewerId && viewerId !== userId) {
+      const [link, blocks] = await Promise.all([
+        this.prisma.friendship.findFirst({
+          where: { OR: [{ senderId: viewerId, receiverId: userId }, { senderId: userId, receiverId: viewerId }] },
+          select: { id: true, senderId: true, status: true },
+        }),
+        this.prisma.block.findMany({
+          where: { OR: [{ blockerId: viewerId, blockedId: userId }, { blockerId: userId, blockedId: viewerId }] },
+          select: { blockerId: true },
+        }),
+      ]);
+      if (blocks.some((b) => b.blockerId === userId)) throw new NotFoundException('User not found');
+      blockedByMe = blocks.some((b) => b.blockerId === viewerId);
+      if (link?.status === 'ACCEPTED') relation = 'FRIEND';
+      else if (link?.status === 'PENDING') {
+        relation = link.senderId === viewerId ? 'REQUEST_SENT' : 'REQUEST_RECEIVED';
+        requestId = link.id;
+      }
+    }
+
+    const online = (await onlineSet(this.redis, [user.id])).has(user.id);
     const membership = user.clubMemberships[0];
     return {
       ...user,
+      online,
+      isPremium: user.subscriptionStatus !== 'FREE',
+      subscriptionStatus: undefined,
       club: membership ? { ...membership.club, role: membership.role } : null,
       clubMemberships: undefined,
+      isMe: viewerId === userId,
+      relation,
+      requestId,
+      blockedByMe,
     };
   }
 
