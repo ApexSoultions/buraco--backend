@@ -85,3 +85,65 @@ describe('ShopService.purchaseItem', () => {
     await expect(setup().service.purchaseItem(USER, 'i1', 'GOLD' as any)).rejects.toThrow(BadRequestException);
   });
 });
+
+// Promo codes could be redeemed again and again by the same player (until maxUses ran out).
+// Now each player can redeem a code once, and the use count can't pass maxUses.
+describe('ShopService.redeemCode', () => {
+  function promoSetup(promo: Partial<any> = {}) {
+    const code = { id: 'p1', code: 'WELCOME', rewardCoins: 500, rewardDiamonds: 0, itemId: null, maxUses: 2, usedCount: 0, expiresAt: null, isActive: true, ...promo };
+    const redeemed = new Set<string>();
+    const user = { coins: 100, diamonds: 0, lives: 5 };
+    const tx = {
+      promoRedemption: {
+        create: jest.fn(async ({ data }: any) => {
+          const key = `${data.promoId}:${data.userId}`;
+          if (redeemed.has(key)) throw new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'x' });
+          redeemed.add(key);
+        }),
+      },
+      promoCode: {
+        updateMany: jest.fn(async ({ where }: any) => {
+          if (where.usedCount && !(code.usedCount < where.usedCount.lt)) return { count: 0 };
+          code.usedCount++;
+          return { count: 1 };
+        }),
+      },
+      user: {
+        findUniqueOrThrow: jest.fn(async () => ({ ...user })),
+        update: jest.fn(async ({ data }: any) => {
+          user.coins += data.coins.increment;
+          user.diamonds += data.diamonds.increment;
+          return { ...user };
+        }),
+      },
+      transaction: { create: jest.fn(async () => ({})) },
+      inventory: { upsert: jest.fn(async () => ({})) },
+    };
+    const prisma = {
+      promoCode: { findFirst: jest.fn(async ({ where }: any) => (String(where.code.equals).toUpperCase() === code.code ? { ...code } : null)) },
+      $transaction: jest.fn(async (fn: any) => {
+        // Roll back the redemption row if the transaction fails, like the database would.
+        const before = new Set(redeemed);
+        try { return await fn(tx); } catch (e) { redeemed.clear(); before.forEach((k) => redeemed.add(k)); throw e; }
+      }),
+    };
+    return { service: new ShopService(prisma as any, {} as any), user, code };
+  }
+
+  it('gives the reward once per player, matching the code without case', async () => {
+    const { service, user } = promoSetup();
+    const res = await service.redeemCode('u1', ' welcome ');
+    expect(res.rewards).toEqual({ coins: 500 });
+    expect(user.coins).toBe(600);
+    await expect(service.redeemCode('u1', 'WELCOME')).rejects.toThrow(ConflictException);
+    expect(user.coins).toBe(600);
+  });
+
+  it('stops at maxUses across players, and refuses unknown or expired codes', async () => {
+    const { service } = promoSetup({ maxUses: 1 });
+    await service.redeemCode('u1', 'WELCOME');
+    await expect(service.redeemCode('u2', 'WELCOME')).rejects.toThrow('Promo code fully redeemed');
+    await expect(service.redeemCode('u3', 'NOPE')).rejects.toThrow(NotFoundException);
+    await expect(promoSetup({ expiresAt: new Date(0) }).service.redeemCode('u1', 'WELCOME')).rejects.toThrow('Promo code expired');
+  });
+});

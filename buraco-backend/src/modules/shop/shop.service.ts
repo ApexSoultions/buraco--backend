@@ -124,32 +124,74 @@ export class ShopService {
     });
   }
 
-  async redeemCode(userId: string, code: string) {
-    const promo = await this.prisma.promoCode.findUnique({ where: { code, isActive: true } });
+  /**
+   * Redeem a promo code. Each player can redeem a code once, the use count can't go past
+   * maxUses even with many players at once, and the rewards are given in the same transaction.
+   * Codes are matched without case ("welcome" = "WELCOME").
+   */
+  async redeemCode(userId: string, rawCode: string) {
+    const code = (rawCode ?? '').trim();
+    if (!code) throw new BadRequestException('Enter a code');
+    const promo = await this.prisma.promoCode.findFirst({ where: { code: { equals: code, mode: 'insensitive' }, isActive: true } });
     if (!promo) throw new NotFoundException('Invalid promo code');
     if (promo.expiresAt && promo.expiresAt < new Date()) throw new BadRequestException('Promo code expired');
-    if (promo.maxUses && promo.usedCount >= promo.maxUses) throw new BadRequestException('Promo code fully redeemed');
 
-    await this.prisma.promoCode.update({ where: { code }, data: { usedCount: { increment: 1 } } });
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        // One per player: the unique (promo, player) row is the lock.
+        await tx.promoRedemption.create({ data: { promoId: promo.id, userId } });
 
-    const rewards: any = {};
-    if (promo.rewardCoins > 0) {
-      await this.economyService.addCoins(userId, promo.rewardCoins, TransactionType.REWARD, promo.id, `Promo: ${code}`);
-      rewards.coins = promo.rewardCoins;
-    }
-    if (promo.rewardDiamonds > 0) {
-      await this.economyService.addDiamonds(userId, promo.rewardDiamonds, TransactionType.REWARD, promo.id, `Promo: ${code}`);
-      rewards.diamonds = promo.rewardDiamonds;
-    }
-    if (promo.itemId) {
-      await this.prisma.inventory.upsert({
-        where: { userId_itemId: { userId, itemId: promo.itemId } },
-        create: { userId, itemId: promo.itemId },
-        update: {},
+        const used = await tx.promoCode.updateMany({
+          where: { id: promo.id, ...(promo.maxUses != null && { usedCount: { lt: promo.maxUses } }) },
+          data: { usedCount: { increment: 1 } },
+        });
+        if (used.count === 0) throw new BadRequestException('Promo code fully redeemed');
+
+        const rewards: { coins?: number; diamonds?: number; itemId?: string } = {};
+        if (promo.rewardCoins > 0 || promo.rewardDiamonds > 0) {
+          const before = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { coins: true, diamonds: true } });
+          const after = await tx.user.update({
+            where: { id: userId },
+            data: { coins: { increment: promo.rewardCoins }, diamonds: { increment: promo.rewardDiamonds } },
+            select: { coins: true, diamonds: true },
+          });
+          if (promo.rewardCoins > 0) {
+            rewards.coins = promo.rewardCoins;
+            await tx.transaction.create({
+              data: {
+                userId, type: TransactionType.REWARD, currency: CurrencyType.COINS, amount: promo.rewardCoins,
+                balanceBefore: before.coins, balanceAfter: after.coins, referenceId: promo.id, description: `Promo: ${promo.code}`,
+              },
+            });
+          }
+          if (promo.rewardDiamonds > 0) {
+            rewards.diamonds = promo.rewardDiamonds;
+            await tx.transaction.create({
+              data: {
+                userId, type: TransactionType.REWARD, currency: CurrencyType.DIAMONDS, amount: promo.rewardDiamonds,
+                balanceBefore: before.diamonds, balanceAfter: after.diamonds, referenceId: promo.id, description: `Promo: ${promo.code}`,
+              },
+            });
+          }
+        }
+        if (promo.itemId) {
+          await tx.inventory.upsert({
+            where: { userId_itemId: { userId, itemId: promo.itemId } },
+            create: { userId, itemId: promo.itemId },
+            update: {},
+          });
+          rewards.itemId = promo.itemId;
+        }
+
+        const balance = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { coins: true, diamonds: true, lives: true } });
+        return { rewards, newBalance: balance };
       });
-      rewards.itemId = promo.itemId;
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        throw new ConflictException('PROMO_ALREADY_REDEEMED');
+      }
+      throw err;
     }
-
-    return { rewards };
   }
+
 }

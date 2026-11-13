@@ -219,6 +219,7 @@ model User {
   reportsReceived     Report[]             @relation("ReportsReceived")
   iapPurchases        IapPurchase[]
   iapSubscriptions    IapSubscription[]
+  promoRedemptions    PromoRedemption[]
 
   @@map("users")
 }
@@ -530,7 +531,23 @@ model PromoCode {
   isActive       Boolean   @default(true)
   createdAt      DateTime  @default(now())
 
+  redemptions PromoRedemption[]
+
   @@map("promo_codes")
+}
+
+/// Who redeemed which promo code: each player can redeem a code once.
+model PromoRedemption {
+  id         String    @id @default(uuid())
+  promoId    String
+  promo      PromoCode @relation(fields: [promoId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User      @relation(fields: [userId], references: [id])
+  redeemedAt DateTime  @default(now())
+
+  @@unique([promoId, userId])
+  @@index([userId])
+  @@map("promo_redemptions")
 }
 
 // ─────────────────────────────────────────────
