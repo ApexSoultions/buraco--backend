@@ -1,9 +1,11 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Put, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { ApiBearerAuth, ApiBody, ApiConsumes, ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { IsString, MaxLength } from 'class-validator';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { SpecialService } from './special.service';
+import { CustomCardsService } from './custom-cards.service';
 
 class NameDto {
   @IsString()
@@ -16,7 +18,10 @@ class NameDto {
 @UseGuards(JwtAuthGuard)
 @Controller('special')
 export class SpecialController {
-  constructor(private readonly special: SpecialService) {}
+  constructor(
+    private readonly special: SpecialService,
+    private readonly customCards: CustomCardsService,
+  ) {}
 
   @Get('features')
   @ApiOperation({ summary: 'Prices, black list size and the player\'s club seats (Special Features page)' })
@@ -62,5 +67,30 @@ export class SpecialController {
   @ApiOperation({ summary: '+10 Black List' })
   addBlockSlots(@CurrentUser('id') userId: string) {
     return this.special.addBlockSlots(userId);
+  }
+
+  // ── Custom Cards ─────────────────────────────────────────────────────────
+
+  @Get('custom-cards')
+  @ApiOperation({ summary: 'My custom cards (PENDING / APPROVED / REJECTED), each with a 1-hour picture link' })
+  myCustomCards(@CurrentUser('id') userId: string) {
+    return this.customCards.listMine(userId);
+  }
+
+  @Post('custom-cards')
+  @ApiOperation({ summary: 'Send a picture as a custom card back (40,000 coins; refunded if rejected). Waits for admin review.' })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({ schema: { type: 'object', required: ['file'], properties: { file: { type: 'string', format: 'binary', description: 'JPG, PNG or WebP, max 5 MB' } } } })
+  @ApiResponse({ status: 400, description: 'INSUFFICIENT_BALANCE or bad picture' })
+  @ApiResponse({ status: 409, description: 'CUSTOM_CARD_PENDING_LIMIT (3 waiting for review)' })
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 5 * 1024 * 1024 } }))
+  createCustomCard(@CurrentUser('id') userId: string, @UploadedFile() file: Express.Multer.File) {
+    return this.customCards.create(userId, file);
+  }
+
+  @Put('custom-cards/:id/equip')
+  @ApiOperation({ summary: 'Use an approved custom card as my card back' })
+  equipCustomCard(@CurrentUser('id') userId: string, @Param('id', new ParseUUIDPipe()) id: string) {
+    return this.customCards.equip(userId, id);
   }
 }

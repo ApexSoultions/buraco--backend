@@ -114,6 +114,10 @@ export class ShopService {
         where: { userId_itemId: { userId, itemId } },
         data: { isEquipped: true, equippedAt: new Date() },
       });
+      // One card back at a time: a custom card in use is put away.
+      if (item.category === ShopCategory.CARDS) {
+        await tx.customCard.updateMany({ where: { userId, isEquipped: true }, data: { isEquipped: false } });
+      }
     });
   }
 

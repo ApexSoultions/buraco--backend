@@ -82,6 +82,7 @@ enum TransactionType {
   MANUAL_DEDUCT
   SUBSCRIPTION
   IAP_PURCHASE
+  REFUND
 }
 
 enum MissionType {
@@ -220,6 +221,7 @@ model User {
   iapPurchases        IapPurchase[]
   iapSubscriptions    IapSubscription[]
   promoRedemptions    PromoRedemption[]
+  customCards         CustomCard[]
 
   @@map("users")
 }
@@ -548,6 +550,33 @@ model PromoRedemption {
   @@unique([promoId, userId])
   @@index([userId])
   @@map("promo_redemptions")
+}
+
+enum CustomCardStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+/// "Custom Cards" (Special Features): a player's own picture as card back. Paid when sent,
+/// shown only after an admin approves it; a rejected card is refunded.
+model CustomCard {
+  id           String           @id @default(uuid())
+  userId       String
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Private S3 key; the game gets a signed link.
+  imageKey     String
+  status       CustomCardStatus @default(PENDING)
+  isEquipped   Boolean          @default(false)
+  pricePaid    Int              @default(0)
+  rejectReason String?
+  reviewedBy   String?
+  reviewedAt   DateTime?
+  createdAt    DateTime         @default(now())
+
+  @@index([userId])
+  @@index([status])
+  @@map("custom_cards")
 }
 
 // ─────────────────────────────────────────────

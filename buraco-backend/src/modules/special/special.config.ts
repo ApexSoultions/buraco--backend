@@ -15,6 +15,10 @@ export const SPECIAL = {
   /** "+10 Black List". */
   blockSlotsPrice: 40000,
   blockSlotsStep: 10,
+  /** "Custom Cards": the player's own picture as card back (refunded if rejected). */
+  customCardPrice: 40000,
+  /** Cards a player may have waiting for review at once. */
+  customCardMaxPending: 3,
   /** Free usernames are at least this long; shorter ones are bought. */
   minFreeNameLength: 4,
   /** Names nobody can buy or take (compared without case). */
