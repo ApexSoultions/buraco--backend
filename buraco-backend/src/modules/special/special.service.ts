@@ -31,6 +31,7 @@ export class SpecialService {
       clubSeatsStep: SPECIAL.clubSeatsStep,
       blockSlotsPrice: SPECIAL.blockSlotsPrice,
       blockSlotsStep: SPECIAL.blockSlotsStep,
+      customCardPrice: SPECIAL.customCardPrice,
       minFreeNameLength: SPECIAL.minFreeNameLength,
       blockLimit: user?.blockLimit ?? 0,
       blockedCount: user?._count.blocksGiven ?? 0,
