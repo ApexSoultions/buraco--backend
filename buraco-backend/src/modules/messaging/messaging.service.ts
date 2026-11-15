@@ -137,7 +137,8 @@ export class MessagingService {
     const [data, total] = await Promise.all([
       this.prisma.message.findMany({
         where,
-        include: { sender: { select: { id: true, username: true } } },
+        // Same sender fields as live messages, so history shows the sender's own picture.
+        include: { sender: { select: SENDER_SELECT } },
         orderBy: { createdAt: 'desc' },
         skip,
         take: limit,
