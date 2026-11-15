@@ -124,6 +124,40 @@ async function main() {
   }
   console.log('Seeded missions:', allMissions.length);
 
+  // ─── Achievements (lifetime goals, each claimed once) ────────────────────
+  const achievements = [
+    { title: 'First Game', description: 'Play your first game', requirement: MissionRequirement.PLAY_GAMES, targetValue: 1, rewardCoins: 200, sortOrder: 1 },
+    { title: 'Regular', description: 'Play 50 games', requirement: MissionRequirement.PLAY_GAMES, targetValue: 50, rewardCoins: 2000, sortOrder: 2 },
+    { title: 'Veteran', description: 'Play 500 games', requirement: MissionRequirement.PLAY_GAMES, targetValue: 500, rewardCoins: 10000, rewardDiamonds: 10, sortOrder: 3 },
+    { title: 'First Win', description: 'Win your first game', requirement: MissionRequirement.WIN_GAMES, targetValue: 1, rewardCoins: 300, sortOrder: 4 },
+    { title: 'Winner', description: 'Win 25 games', requirement: MissionRequirement.WIN_GAMES, targetValue: 25, rewardCoins: 3000, sortOrder: 5 },
+    { title: 'Champion', description: 'Win 250 games', requirement: MissionRequirement.WIN_GAMES, targetValue: 250, rewardCoins: 15000, rewardDiamonds: 20, sortOrder: 6 },
+    { title: 'Hot Streak', description: 'Win 5 games in a row', requirement: MissionRequirement.WIN_STREAK, targetValue: 5, rewardCoins: 2500, sortOrder: 7 },
+    { title: 'Point Collector', description: 'Earn 10,000 points', requirement: MissionRequirement.EARN_POINTS, targetValue: 10000, rewardCoins: 3000, sortOrder: 8 },
+    { title: 'Classic Player', description: 'Play 20 Classic games', requirement: MissionRequirement.PLAY_CLASSIC, targetValue: 20, rewardCoins: 1500, sortOrder: 9 },
+    { title: 'Professional', description: 'Play 20 Professional games', requirement: MissionRequirement.PLAY_PROFESSIONAL, targetValue: 20, rewardCoins: 2500, sortOrder: 10 },
+    { title: 'Team Player', description: 'Join a club', requirement: MissionRequirement.JOIN_CLUB, targetValue: 1, rewardCoins: 500, sortOrder: 11 },
+    { title: 'Chatty', description: 'Send 100 messages', requirement: MissionRequirement.SEND_MESSAGES, targetValue: 100, rewardCoins: 1000, sortOrder: 12 },
+  ];
+  for (const a of achievements) {
+    const existing = await prisma.achievement.findFirst({ where: { title: a.title } });
+    if (!existing) await prisma.achievement.create({ data: a });
+  }
+  console.log('Seeded achievements:', achievements.length);
+
+  // ─── Clan objectives (weekly goals for the whole club) ───────────────────
+  const clubObjectives = [
+    { title: 'Play Together', description: 'Club members play 50 games this week', requirement: MissionRequirement.PLAY_GAMES, targetValue: 50, rewardCoins: 500, rewardClubPoints: 500, sortOrder: 1 },
+    { title: 'Win 20 Games', description: 'Club members win 20 games this week', requirement: MissionRequirement.WIN_GAMES, targetValue: 20, rewardCoins: 1000, rewardClubPoints: 1000, sortOrder: 2 },
+    { title: 'Point Hunters', description: 'Club members earn 20,000 points this week', requirement: MissionRequirement.EARN_POINTS, targetValue: 20000, rewardCoins: 1500, rewardClubPoints: 1500, sortOrder: 3 },
+    { title: 'Professionals', description: 'Club members play 15 Professional games this week', requirement: MissionRequirement.PLAY_PROFESSIONAL, targetValue: 15, rewardCoins: 1000, rewardClubPoints: 800, sortOrder: 4 },
+  ];
+  for (const o of clubObjectives) {
+    const existing = await prisma.clubObjective.findFirst({ where: { title: o.title } });
+    if (!existing) await prisma.clubObjective.create({ data: o });
+  }
+  console.log('Seeded clan objectives:', clubObjectives.length);
+
   // ─── Shop Items ───────────────────────────────────────────────────────────
   const shopItems = [
     // Subscriptions

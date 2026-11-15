@@ -79,6 +79,7 @@ export class RankingsService implements OnModuleInit {
         id: true,
         username: true,
         avatarUrl: true,
+        country: true,
         stats: { select: { level: true, classicPoints: true, wins: true } },
         clubMemberships: {
           where: { status: 'ACTIVE' },
@@ -152,5 +153,67 @@ export class RankingsService implements OnModuleInit {
       stats: user?.stats,
       club: membership ? { ...membership.club, role: membership.role } : null,
     };
+  }
+
+  /**
+   * Clan ranking: clubs by club points (matches their members play, objectives completed),
+   * with the player's own club and its rank when they are in one.
+   */
+  async getClubRanking(page = 1, limit = 50, requestingUserId?: string) {
+    page = Math.max(1, Math.floor(page) || 1);
+    limit = Math.min(MAX_PAGE_SIZE, Math.max(1, Math.floor(limit) || 50));
+    const [clubs, total] = await Promise.all([
+      this.prisma.club.findMany({
+        orderBy: [{ points: 'desc' }, { createdAt: 'asc' }],
+        skip: (page - 1) * limit,
+        take: limit,
+        select: { id: true, name: true, iconUrl: true, mode: true, level: true, points: true, memberCount: true, maxMembers: true, createdAt: true },
+      }),
+      this.prisma.club.count(),
+    ]);
+    const data = clubs.map((c, i) => ({ rank: (page - 1) * limit + i + 1, ...c }));
+
+    let myClub: (typeof data)[number] | null = null;
+    if (requestingUserId) {
+      const membership = await this.prisma.clubMember.findFirst({
+        where: { userId: requestingUserId, status: 'ACTIVE' },
+        select: { club: { select: { id: true, name: true, iconUrl: true, mode: true, level: true, points: true, memberCount: true, maxMembers: true, createdAt: true } } },
+      });
+      if (membership) {
+        const c = membership.club;
+        // Clubs ahead: more points, or the same points and older (the list's tie order).
+        const ahead = await this.prisma.club.count({
+          where: { OR: [{ points: { gt: c.points } }, { points: c.points, createdAt: { lt: c.createdAt } }] },
+        });
+        myClub = { rank: ahead + 1, ...c };
+      }
+    }
+    return { data, myClub, meta: { total, page, limit, totalPages: Math.max(1, Math.ceil(total / limit)) } };
+  }
+
+  /**
+   * Top Countries: players grouped by the country on their profile, ranked by their total
+   * points, then wins. Players without a country are not counted.
+   */
+  async getCountryRanking(limit = 50, requestingUserId?: string) {
+    limit = Math.min(MAX_PAGE_SIZE, Math.max(1, Math.floor(limit) || 50));
+    const rows = await this.prisma.$queryRaw<Array<{ country: string; players: number; points: number; wins: number }>>`
+      SELECT u."country" AS country,
+             COUNT(*)::int AS players,
+             COALESCE(SUM(s."points"), 0)::int AS points,
+             COALESCE(SUM(s."wins"), 0)::int AS wins
+      FROM "users" u
+      LEFT JOIN "player_stats" s ON s."userId" = u."id"
+      WHERE u."country" IS NOT NULL AND u."isDeleted" = false AND u."isBanned" = false
+      GROUP BY u."country"
+      ORDER BY points DESC, wins DESC, players DESC, country ASC`;
+    const ranked = rows.map((r, i) => ({ rank: i + 1, ...r }));
+
+    let myCountry: (typeof ranked)[number] | null = null;
+    if (requestingUserId) {
+      const me = await this.prisma.user.findUnique({ where: { id: requestingUserId }, select: { country: true } });
+      myCountry = me?.country ? ranked.find((r) => r.country === me.country) ?? null : null;
+    }
+    return { data: ranked.slice(0, limit), myCountry, total: ranked.length };
   }
 }

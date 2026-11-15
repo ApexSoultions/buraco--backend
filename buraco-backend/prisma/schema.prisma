@@ -83,6 +83,15 @@ enum TransactionType {
   SUBSCRIPTION
   IAP_PURCHASE
   REFUND
+  ACHIEVEMENT_REWARD
+  CLUB_OBJECTIVE_REWARD
+}
+
+enum ClubInviteStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  CANCELLED
 }
 
 enum MissionType {
@@ -191,6 +200,8 @@ model User {
   voiceChatExpiry    DateTime?
   /// How many players this player can block (Special Features "+10 Black List" adds 10).
   blockLimit         Int                @default(50)
+  /// Country as a 2-letter ISO code ("QA", "BR"); shown as a flag, counted in Top Countries.
+  country            String?            @db.VarChar(2)
   isBanned           Boolean            @default(false)
   banReason          String?
   isDeleted          Boolean            @default(false)
@@ -222,6 +233,10 @@ model User {
   iapSubscriptions    IapSubscription[]
   promoRedemptions    PromoRedemption[]
   customCards         CustomCard[]
+  clubInvitesSent     ClubInvite[]          @relation("ClubInvitesSent")
+  clubInvitesReceived ClubInvite[]          @relation("ClubInvitesReceived")
+  clubAdvices         ClubAdvice[]
+  achievementProgress AchievementProgress[]
 
   @@map("users")
 }
@@ -338,8 +353,132 @@ model Club {
 
   members      ClubMember[]
   conversation Conversation?
+  invites      ClubInvite[]
+  activities   ClubActivity[]
+  advices      ClubAdvice[]
+  objectives   ClubObjectiveProgress[]
 
+  @@index([points])
   @@map("clubs")
+}
+
+/// A club officer invites a player; the player accepts (joins) or declines.
+model ClubInvite {
+  id          String           @id @default(uuid())
+  clubId      String
+  club        Club             @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  inviterId   String
+  inviter     User             @relation("ClubInvitesSent", fields: [inviterId], references: [id], onDelete: Cascade)
+  inviteeId   String
+  invitee     User             @relation("ClubInvitesReceived", fields: [inviteeId], references: [id], onDelete: Cascade)
+  status      ClubInviteStatus @default(PENDING)
+  createdAt   DateTime         @default(now())
+  respondedAt DateTime?
+
+  @@index([inviteeId, status])
+  @@index([clubId, status])
+  @@map("club_invites")
+}
+
+/// The club's News feed: "Player234 joined the club", level ups, objectives completed.
+model ClubActivity {
+  id        String   @id @default(uuid())
+  clubId    String
+  club      Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  /// CREATED, JOINED, LEFT, REMOVED, ROLE_CHANGED, LEVEL_UP, OBJECTIVE_COMPLETED, RENAMED
+  type      String
+  userId    String?
+  text      String
+  data      Json?
+  createdAt DateTime @default(now())
+
+  @@index([clubId, createdAt])
+  @@map("club_activities")
+}
+
+/// Advice posted by the club's leader or vice leaders for every member to read.
+model ClubAdvice {
+  id        String   @id @default(uuid())
+  clubId    String
+  club      Club     @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  text      String
+  createdAt DateTime @default(now())
+
+  @@index([clubId, createdAt])
+  @@map("club_advices")
+}
+
+/// A weekly challenge for a whole club ("Win 20 games"); every member's matches count.
+model ClubObjective {
+  id               String             @id @default(uuid())
+  title            String
+  description      String
+  requirement      MissionRequirement
+  targetValue      Int
+  /// Only matches of this mode count; null = any mode.
+  mode             GameMode?
+  /// Paid to every active member when the club completes it.
+  rewardCoins      Int                @default(0)
+  /// Added to the club's points when completed.
+  rewardClubPoints Int                @default(0)
+  sortOrder        Int                @default(0)
+  isActive         Boolean            @default(true)
+  createdAt        DateTime           @default(now())
+
+  progress ClubObjectiveProgress[]
+
+  @@map("club_objectives")
+}
+
+model ClubObjectiveProgress {
+  id           String        @id @default(uuid())
+  clubId       String
+  club         Club          @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  objectiveId  String
+  objective    ClubObjective @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
+  /// The week this progress belongs to, e.g. "2026-W46"; a new week starts from zero.
+  period       String
+  currentValue Int           @default(0)
+  completedAt  DateTime?
+
+  @@unique([clubId, objectiveId, period])
+  @@map("club_objective_progress")
+}
+
+/// A lifetime goal for one player ("Win 10 games → 1,000 coins"), claimed once.
+model Achievement {
+  id             String             @id @default(uuid())
+  title          String
+  description    String
+  requirement    MissionRequirement
+  targetValue    Int
+  /// Only matches of this mode count; null = any mode.
+  mode           GameMode?
+  rewardCoins    Int                @default(0)
+  rewardDiamonds Int                @default(0)
+  sortOrder      Int                @default(0)
+  isActive       Boolean            @default(true)
+  createdAt      DateTime           @default(now())
+
+  progress AchievementProgress[]
+
+  @@map("achievements")
+}
+
+model AchievementProgress {
+  id            String      @id @default(uuid())
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  achievementId String
+  achievement   Achievement @relation(fields: [achievementId], references: [id], onDelete: Cascade)
+  currentValue  Int         @default(0)
+  completedAt   DateTime?
+  claimedAt     DateTime?
+
+  @@unique([userId, achievementId])
+  @@map("achievement_progress")
 }
 
 model ClubMember {
@@ -350,6 +489,8 @@ model ClubMember {
   user     User         @relation(fields: [userId], references: [id])
   role     ClubRole     @default(MEMBER)
   status   MemberStatus @default(ACTIVE)
+  /// Points this member has earned for the club ("Point : 23" on the member card).
+  points   Int          @default(0)
   joinedAt DateTime     @default(now())
 
   @@unique([clubId, userId])

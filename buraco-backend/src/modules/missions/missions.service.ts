@@ -1,9 +1,10 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { GameMode, Mission, MissionRequirement, MissionType, NotificationType, TransactionType } from '@prisma/client';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { EconomyService } from '../economy/economy.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { AchievementsService } from './achievements.service';
 
 const DAILY_MISSION_COUNT = 3;
 const WEEKLY_MISSION_COUNT = 3;
@@ -19,7 +20,7 @@ export function pickRandom<T>(items: T[], count: number): T[] {
 }
 
 /** One change to a requirement: `add` counts up, `atLeast` raises to a value (streaks). */
-type ProgressChange = { requirement: MissionRequirement; add?: number; atLeast?: number };
+export type ProgressChange = { requirement: MissionRequirement; add?: number; atLeast?: number };
 
 export interface MatchProgress {
   mode: GameMode;
@@ -27,6 +28,17 @@ export interface MatchProgress {
   pointsEarned: number;
   /** The player's win streak after this match (0 after a loss). */
   winStreak: number;
+}
+
+/** What one finished match counts towards (missions, achievements, club objectives). */
+export function matchChanges(match: MatchProgress): ProgressChange[] {
+  const changes: ProgressChange[] = [{ requirement: MissionRequirement.PLAY_GAMES, add: 1 }];
+  if (match.isWinner) changes.push({ requirement: MissionRequirement.WIN_GAMES, add: 1 });
+  if (match.pointsEarned > 0) changes.push({ requirement: MissionRequirement.EARN_POINTS, add: match.pointsEarned });
+  if (match.mode === GameMode.CLASSIC) changes.push({ requirement: MissionRequirement.PLAY_CLASSIC, add: 1 });
+  if (match.mode === GameMode.PROFESSIONAL) changes.push({ requirement: MissionRequirement.PLAY_PROFESSIONAL, add: 1 });
+  if (match.winStreak > 0) changes.push({ requirement: MissionRequirement.WIN_STREAK, atLeast: match.winStreak });
+  return changes;
 }
 
 @Injectable()
@@ -37,6 +49,7 @@ export class MissionsService {
     private prisma: PrismaService,
     private economyService: EconomyService,
     private notifications: NotificationsService,
+    @Optional() private achievements?: AchievementsService,
   ) {}
 
   async getActiveMissions(userId: string) {
@@ -80,17 +93,15 @@ export class MissionsService {
   }
 
   async updateProgress(userId: string, event: MissionRequirement, value = 1) {
+    await this.achievements?.advanceSafely(userId, [{ requirement: event, add: value }]);
     return this.advance(userId, [{ requirement: event, add: value }]);
   }
 
   /** Everything one finished match counts towards, applied in one pass. */
   async recordMatch(userId: string, match: MatchProgress) {
-    const changes: ProgressChange[] = [{ requirement: MissionRequirement.PLAY_GAMES, add: 1 }];
-    if (match.isWinner) changes.push({ requirement: MissionRequirement.WIN_GAMES, add: 1 });
-    if (match.pointsEarned > 0) changes.push({ requirement: MissionRequirement.EARN_POINTS, add: match.pointsEarned });
-    if (match.mode === GameMode.CLASSIC) changes.push({ requirement: MissionRequirement.PLAY_CLASSIC, add: 1 });
-    if (match.mode === GameMode.PROFESSIONAL) changes.push({ requirement: MissionRequirement.PLAY_PROFESSIONAL, add: 1 });
-    if (match.winStreak > 0) changes.push({ requirement: MissionRequirement.WIN_STREAK, atLeast: match.winStreak });
+    const changes = matchChanges(match);
+    // Lifetime achievements count the same events (never throws).
+    await this.achievements?.advanceSafely(userId, changes, match.mode);
     return this.advance(userId, changes);
   }
 

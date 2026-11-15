@@ -65,6 +65,14 @@ export class ProfileController {
     return this.special.rename(userId, dto.username!);
   }
 
+  @Put('country')
+  @ApiOperation({ summary: 'Set my country (two-letter ISO code, e.g. PK or BR; empty to remove) for my flag and Top Countries' })
+  @ApiBody({ schema: { type: 'object', properties: { country: { type: 'string', example: 'PK' } }, required: ['country'] } })
+  @ApiResponse({ status: 400, description: 'Not a two-letter code' })
+  setCountry(@CurrentUser('id') userId: string, @Body('country') country: string) {
+    return this.profileService.setCountry(userId, country);
+  }
+
   @Post('avatar/upload')
   @ApiOperation({ summary: 'Upload custom avatar image (max 5 MB)' })
   @ApiConsumes('multipart/form-data')

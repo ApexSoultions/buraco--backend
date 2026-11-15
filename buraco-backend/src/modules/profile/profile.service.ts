@@ -63,6 +63,17 @@ export class ProfileService {
    * viewer is connected to them (friend, request either way, blocked by the viewer). A player
    * who has blocked the viewer is not shown (404), the same as everywhere else.
    */
+  /**
+   * The player's country for the flag on their card and the Top Countries ranking:
+   * a two-letter ISO code ("PK", "BR"), or null to remove it.
+   */
+  async setCountry(userId: string, raw: string | null) {
+    const code = (raw ?? '').trim().toUpperCase();
+    if (code && !/^[A-Z]{2}$/.test(code)) throw new BadRequestException('Country must be a two-letter code, e.g. PK or BR');
+    const user = await this.prisma.user.update({ where: { id: userId }, data: { country: code || null }, select: { country: true } });
+    return { country: user.country };
+  }
+
   async getPublicProfile(userId: string, viewerId?: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId, isDeleted: false },
@@ -70,6 +81,7 @@ export class ProfileService {
         id: true,
         username: true,
         avatarUrl: true,
+        country: true,
         registrationDate: true,
         lastSeenAt: true,
         subscriptionStatus: true,

@@ -37,6 +37,21 @@ export class RankingsController {
     return this.rankingsService.getInternationalRanking(+page, +limit, userId);
   }
 
+  @Get('clubs')
+  @ApiOperation({ summary: 'Clan ranking: clubs by club points, with my club and its rank' })
+  @ApiQuery({ name: 'page',  required: false, type: Number, description: 'Page number (default 1)' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Clubs per page (default 50)' })
+  getClubRanking(@CurrentUser('id') userId: string, @Query('page') page = 1, @Query('limit') limit = 50) {
+    return this.rankingsService.getClubRanking(+page, +limit, userId);
+  }
+
+  @Get('countries')
+  @ApiOperation({ summary: "Top Countries: total points of each country's players (players set it on their profile)" })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Countries (default 50)' })
+  getCountryRanking(@CurrentUser('id') userId: string, @Query('limit') limit = 50) {
+    return this.rankingsService.getCountryRanking(+limit, userId);
+  }
+
   @Get('player/:userId')
   @ApiOperation({ summary: "Get a specific player's rank and surrounding leaderboard context" })
   @ApiParam({ name: 'userId', description: 'Player UUID' })

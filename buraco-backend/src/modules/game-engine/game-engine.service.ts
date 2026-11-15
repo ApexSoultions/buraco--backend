@@ -1680,7 +1680,13 @@ export class GameEngineService implements OnModuleInit {
         pointsEarned: reward.points,
         winStreak:    stats?.winStreak ?? 0,
       });
-      await this.clubsService.awardMatchPointsSafely(p.userId, reward.points);
+      // Club and member points, and this week's Clan Objectives (never throws).
+      await this.clubsService.recordMatchSafely(p.userId, {
+        mode,
+        isWinner:     p.isWinner,
+        pointsEarned: reward.points,
+        winStreak:    stats?.winStreak ?? 0,
+      });
     }));
   }
 

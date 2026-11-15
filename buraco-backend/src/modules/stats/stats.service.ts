@@ -120,6 +120,28 @@ export class StatsService {
     return level;
   }
 
+  /**
+   * The Level List: every level from 1 to `upTo`, the XP that level needs, and the total XP
+   * at which a player reaches it (same formula as levelProgress / calculateLevel).
+   * With a player, also their level and total XP so the list can mark where they are.
+   */
+  async levelTable(upTo = 50, userId?: string) {
+    const max = Math.min(200, Math.max(1, Math.floor(upTo) || 50));
+    const levels: Array<{ level: number; xpToReach: number; xpForLevel: number }> = [];
+    let total = 0;
+    for (let level = 1; level <= max; level++) {
+      const xpForLevel = this.xpForNextLevel(level);
+      levels.push({ level, xpToReach: total, xpForLevel });
+      total += xpForLevel;
+    }
+    let me: { level: number; experience: number } | null = null;
+    if (userId) {
+      const stats = await this.prisma.playerStats.findUnique({ where: { userId }, select: { level: true, experience: true } });
+      if (stats) me = stats;
+    }
+    return { levels, me };
+  }
+
   private xpForNextLevel(level: number): number {
     if (level <= 10) return level * 100;
     if (level <= 30) return level * 200;

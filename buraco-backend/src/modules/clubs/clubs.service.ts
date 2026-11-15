@@ -1,7 +1,11 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { ClubRole, ClubType, MemberStatus, MissionRequirement, NotificationType, Prisma } from '@prisma/client';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
+import { ClubInviteStatus, ClubObjective, ClubRole, ClubType, MemberStatus, MissionRequirement, NotificationType, Prisma, TransactionType } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
-import { MissionsService } from '../missions/missions.service';
+import { MatchProgress, MissionsService, matchChanges } from '../missions/missions.service';
+import { EconomyService } from '../economy/economy.service';
+import { ClubFeedService } from './club-feed.service';
+import { ClubObjectivesService } from './club-objectives.service';
+import { requireClubRole } from './club-access';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CreateClubDto } from './dto/create-club.dto';
 import { UpdateClubDto } from './dto/update-club.dto';
@@ -29,6 +33,9 @@ export class ClubsService {
     private prisma: PrismaService,
     private notifications: NotificationsService,
     private missions: MissionsService,
+    @Optional() private feed?: ClubFeedService,
+    @Optional() private objectives?: ClubObjectivesService,
+    @Optional() private economy?: EconomyService,
   ) {}
 
   async createClub(userId: string, dto: CreateClubDto) {
@@ -47,6 +54,7 @@ export class ClubsService {
       return club;
     });
     await this.missions.updateProgressSafely(userId, MissionRequirement.JOIN_CLUB);
+    await this.feed?.logSafely(created.id, 'CREATED', `${await this.usernameOf(userId)} created the club`, userId);
     return created;
   }
 
@@ -112,8 +120,47 @@ export class ClubsService {
     await this.missions.updateProgressSafely(userId, MissionRequirement.JOIN_CLUB);
 
     const username = await this.usernameOf(userId);
+    await this.feed?.logSafely(clubId, 'JOINED', `${username} joined the club`, userId);
     await this.notifications.notifySafely(await this.officerIds(clubId, userId), NotificationType.CLUB_UPDATE,
       club.name, `${username} joined the club`, { clubId, event: 'MEMBER_JOINED', userId, username });
+  }
+
+  /**
+   * Join through an accepted invite: no "By Request" check and no join-points minimum, but
+   * still one club per player and a free seat. A pending join request becomes membership.
+   */
+  async admitMember(clubId: string, userId: string) {
+    const club = await this.prisma.club.findUnique({ where: { id: clubId }, select: { name: true } });
+    if (!club) throw new NotFoundException('Club not found');
+    await this.assertNotInAnyClub(userId);
+
+    await this.prisma.$transaction(async (tx) => {
+      await this.takeSeat(tx, clubId);
+      await tx.clubMember.upsert({
+        where: { clubId_userId: { clubId, userId } },
+        create: { clubId, userId, role: ClubRole.MEMBER, status: MemberStatus.ACTIVE },
+        update: { status: MemberStatus.ACTIVE, role: ClubRole.MEMBER },
+      });
+      await this.addToClubChat(tx, clubId, userId);
+    });
+    await this.missions.updateProgressSafely(userId, MissionRequirement.JOIN_CLUB);
+
+    const username = await this.usernameOf(userId);
+    await this.feed?.logSafely(clubId, 'JOINED', `${username} joined the club`, userId, { via: 'INVITE' });
+    await this.notifications.notifySafely(await this.officerIds(clubId, userId), NotificationType.CLUB_UPDATE,
+      club.name, `${username} accepted the invite and joined`, { clubId, event: 'MEMBER_JOINED', userId, username });
+  }
+
+  /** "Clear All" on the Invites tab: decline every waiting join request. */
+  async declineAllRequests(officerId: string, clubId: string) {
+    await this.requireRole(officerId, clubId, [ClubRole.LEADER, ClubRole.VICE_LEADER]);
+    const pending = await this.prisma.clubMember.findMany({ where: { clubId, status: MemberStatus.PENDING }, select: { userId: true } });
+    if (pending.length === 0) return { declined: 0 };
+    await this.prisma.clubMember.deleteMany({ where: { clubId, status: MemberStatus.PENDING } });
+    const name = await this.clubName(clubId);
+    await this.notifications.notifySafely(pending.map((p) => p.userId), NotificationType.CLUB_REQUEST_DECLINED,
+      name, `Your request to join ${name} was declined`, { clubId });
+    return { declined: pending.length };
   }
 
   async requestToJoin(userId: string, clubId: string) {
@@ -146,6 +193,7 @@ export class ClubsService {
         await this.addToClubChat(tx, clubId, memberId);
       });
       await this.missions.updateProgressSafely(memberId, MissionRequirement.JOIN_CLUB);
+      await this.feed?.logSafely(clubId, 'JOINED', `${await this.usernameOf(memberId)} joined the club`, memberId);
     } else {
       await this.prisma.clubMember.delete({ where: { clubId_userId: { clubId, userId: memberId } } });
     }
@@ -175,6 +223,7 @@ export class ClubsService {
     });
 
     const club = await this.clubName(clubId);
+    await this.feed?.logSafely(clubId, 'REMOVED', `${await this.usernameOf(memberId)} was removed from the club`, memberId);
     await this.notifications.notifySafely(memberId, NotificationType.CLUB_UPDATE,
       club, `You were removed from ${club}`, { clubId, event: 'REMOVED' });
   }
@@ -198,6 +247,7 @@ export class ClubsService {
     });
 
     const club = await this.clubName(clubId);
+    await this.feed?.logSafely(clubId, 'ROLE_CHANGED', `${await this.usernameOf(memberId)} is now ${ROLE_LABEL[role]}`, memberId, { role });
     await this.notifications.notifySafely(memberId, NotificationType.CLUB_UPDATE,
       club, `You are now ${ROLE_LABEL[role]} of ${club}`, { clubId, event: 'ROLE_CHANGED', role });
     return updated;
@@ -222,6 +272,7 @@ export class ClubsService {
 
     if (wasActive) {
       const [club, username] = await Promise.all([this.clubName(clubId), this.usernameOf(userId)]);
+      await this.feed?.logSafely(clubId, 'LEFT', `${username} left the club`, userId);
       await this.notifications.notifySafely(await this.officerIds(clubId, userId), NotificationType.CLUB_UPDATE,
         club, `${username} left the club`, { clubId, event: 'MEMBER_LEFT', userId, username });
     }
@@ -233,16 +284,32 @@ export class ClubsService {
       include: {
         members: {
           where: { status: MemberStatus.ACTIVE },
-          include: { user: { select: { id: true, username: true, avatarUrl: true, stats: { select: { level: true } } } } },
+          include: { user: { select: { id: true, username: true, avatarUrl: true, country: true, stats: { select: { level: true } } } } },
         },
       },
     });
     if (!club) throw new NotFoundException('Club not found');
 
+    // Leader, vice leaders, then members by the points they earned for the club.
+    const order: Record<ClubRole, number> = { [ClubRole.LEADER]: 0, [ClubRole.VICE_LEADER]: 1, [ClubRole.MEMBER]: 2 };
+    club.members.sort((a, b) => order[a.role] - order[b.role] || (b.points ?? 0) - (a.points ?? 0));
+
     let myRole: ClubRole | null = null;
+    // ACTIVE (member), PENDING (asked to join) or null; myInviteId: an invite waiting for me.
+    let myStatus: MemberStatus | null = null;
+    let myInviteId: string | null = null;
     if (requestingUserId) {
       const membership = club.members.find((m) => m.userId === requestingUserId);
       myRole = membership?.role || null;
+      myStatus = membership ? MemberStatus.ACTIVE : null;
+      if (!membership) {
+        const [request, invite] = await Promise.all([
+          this.prisma.clubMember.findUnique({ where: { clubId_userId: { clubId, userId: requestingUserId } }, select: { status: true } }),
+          this.prisma.clubInvite.findFirst({ where: { clubId, inviteeId: requestingUserId, status: ClubInviteStatus.PENDING }, select: { id: true } }),
+        ]);
+        myStatus = request?.status ?? null;
+        myInviteId = invite?.id ?? null;
+      }
     }
 
     // Officers see who is waiting to join.
@@ -254,7 +321,7 @@ export class ClubsService {
         })
       : [];
 
-    return { ...club, myRole, pendingRequests, ...this.levelProgress(club.points) };
+    return { ...club, myRole, myStatus, myInviteId, pendingRequests, nextLevel: club.level + 1, ...this.levelProgress(club.points) };
   }
 
   /** Progress inside the current level; the old formula divided by level × 1000 and drifted. */
@@ -302,6 +369,7 @@ export class ClubsService {
           where: { clubId, status: MemberStatus.ACTIVE },
           select: { userId: true },
         });
+        await this.feed?.logSafely(clubId, 'LEVEL_UP', `The club reached level ${level}`, undefined, { level });
         await this.notifications.notifySafely(members.map((m) => m.userId), NotificationType.CLUB_UPDATE,
           club.name, `${club.name} reached level ${level}!`, { clubId, event: 'LEVEL_UP', level });
       }
@@ -321,10 +389,59 @@ export class ClubsService {
         where: { userId, status: MemberStatus.ACTIVE },
         select: { clubId: true },
       });
-      if (membership) await this.addClubPoints(membership.clubId, pointsEarned);
+      if (membership) await this.addMemberPoints(membership.clubId, userId, pointsEarned);
     } catch (err) {
       this.logger.error(`Club points after match failed for ${userId}`, err as Error);
     }
+  }
+
+  /**
+   * Everything a finished match gives the player's club: points (the club's, and the
+   * member's own "Point" on their card) and progress on this week's Clan Objectives, paying
+   * any objective it completes. Never throws: called right after a match is settled and paid.
+   */
+  async recordMatchSafely(userId: string, match: MatchProgress) {
+    try {
+      const membership = await this.prisma.clubMember.findFirst({
+        where: { userId, status: MemberStatus.ACTIVE },
+        select: { clubId: true },
+      });
+      if (!membership) return;
+      if (match.pointsEarned > 0) await this.addMemberPoints(membership.clubId, userId, match.pointsEarned);
+      const done = (await this.objectives?.advance(membership.clubId, matchChanges(match), match.mode)) ?? [];
+      for (const objective of done) await this.payObjective(membership.clubId, objective);
+    } catch (err) {
+      this.logger.error(`Club progress after match failed for ${userId}`, err as Error);
+    }
+  }
+
+  private async addMemberPoints(clubId: string, userId: string, points: number) {
+    await this.addClubPoints(clubId, points);
+    await this.prisma.clubMember.updateMany({ where: { clubId, userId, status: MemberStatus.ACTIVE }, data: { points: { increment: points } } });
+  }
+
+  /** A completed objective: coins to every active member, points to the club, news, notice. */
+  private async payObjective(clubId: string, objective: ClubObjective) {
+    const members = await this.prisma.clubMember.findMany({ where: { clubId, status: MemberStatus.ACTIVE }, select: { userId: true } });
+    if (objective.rewardCoins > 0 && this.economy) {
+      for (const m of members) {
+        try {
+          await this.economy.addCoins(m.userId, objective.rewardCoins, TransactionType.CLUB_OBJECTIVE_REWARD, objective.id, objective.title);
+        } catch (err) {
+          this.logger.error(`Objective reward failed for ${m.userId}`, err as Error);
+        }
+      }
+    }
+    if (objective.rewardClubPoints > 0) await this.addClubPoints(clubId, objective.rewardClubPoints);
+
+    const name = await this.clubName(clubId);
+    await this.feed?.logSafely(clubId, 'OBJECTIVE_COMPLETED', `The club completed "${objective.title}"`, undefined,
+      { objectiveId: objective.id, rewardCoins: objective.rewardCoins, rewardClubPoints: objective.rewardClubPoints });
+    await this.notifications.notifySafely(members.map((m) => m.userId), NotificationType.CLUB_UPDATE, name,
+      objective.rewardCoins > 0
+        ? `${name} completed "${objective.title}": +${objective.rewardCoins} coins for you`
+        : `${name} completed "${objective.title}"`,
+      { clubId, event: 'OBJECTIVE_COMPLETED', objectiveId: objective.id, rewardCoins: objective.rewardCoins });
   }
 
   /** One active club per player. */
@@ -384,10 +501,6 @@ export class ClubsService {
   }
 
   private async requireRole(userId: string, clubId: string, roles: ClubRole[]) {
-    const member = await this.prisma.clubMember.findUnique({ where: { clubId_userId: { clubId, userId } } });
-    if (!member || member.status !== MemberStatus.ACTIVE || !roles.includes(member.role)) {
-      throw new ForbiddenException('Insufficient club permissions');
-    }
-    return member;
+    return requireClubRole(this.prisma, userId, clubId, roles);
   }
 }
