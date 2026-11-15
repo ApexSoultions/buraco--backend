@@ -61,8 +61,12 @@ ssh -i /e/keys/buraco-new ubuntu@13.232.172.199
 rm -rf ~/release && git clone --depth 1 --branch BRANCH https://github.com/ApexSoultions/buraco--backend.git ~/release
 rm -rf ~/buraco-backend-new && cp -a ~/release/buraco-backend ~/buraco-backend-new
 cp ~/buraco-backend/.env ~/buraco-backend-new/.env
-cd ~/buraco-backend-new && npm ci && npx prisma generate && npm run build && ls dist/src/main.js
+cd ~/buraco-backend-new && npm ci && npx prisma generate && NODE_OPTIONS=--max-old-space-size=1536 npm run build && ls dist/src/main.js
 ```
+
+The server has about 900 MB of memory plus 2 GB of swap. The build needs more than Node's
+default limit (~450 MB), so `NODE_OPTIONS` lets it use the swap; without it the build stops with
+"JavaScript heap out of memory" (the live server keeps running the old version, nothing breaks).
 
 ### 3. Check the settings file
 
