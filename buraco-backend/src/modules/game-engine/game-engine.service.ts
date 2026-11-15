@@ -121,6 +121,21 @@ export interface TossResult {
   reason: string;
 }
 
+/** Seat card / player popup data shown in a match. */
+export interface TablePlayerProfile {
+  avatarUrl: string | null;
+  /** 2-letter ISO code, e.g. "BR" — shown as a flag. */
+  country: string | null;
+  level: number;
+  clubId: string | null;
+  clubName: string | null;
+  clubIconUrl: string | null;
+}
+
+const EMPTY_TABLE_PROFILE: TablePlayerProfile = {
+  avatarUrl: null, country: null, level: 1, clubId: null, clubName: null, clubIconUrl: null,
+};
+
 export interface GameState {
   gameId: string;
   /**
@@ -160,6 +175,12 @@ export interface GameState {
   potCollectedByTeam: number[];
   seatMap: Record<string, number>;
   usernames: Record<string, string>;
+  /**
+   * What the table shows about each player (avatar, flag, level, clan badge), copied once at
+   * deal time so every move broadcast does not re-query the database. Missing on states
+   * written before this field existed; those players read as all-null.
+   */
+  profiles?: Record<string, TablePlayerProfile>;
   toss: TossResult | null;
   setupComplete: boolean;
   tossComplete: boolean;
@@ -481,10 +502,33 @@ export class GameEngineService implements OnModuleInit {
 
     const users = await this.prisma.user.findMany({
       where: { id: { in: dbUserIds } },
-      select: { id: true, username: true },
+      select: {
+        id: true,
+        username: true,
+        avatarUrl: true,
+        country: true,
+        stats: { select: { level: true } },
+        clubMemberships: {
+          where: { status: 'ACTIVE' },
+          take: 1,
+          select: { club: { select: { id: true, name: true, iconUrl: true } } },
+        },
+      },
     });
     const usernames: Record<string, string> = {};
-    for (const u of users) usernames[u.id] = u.username;
+    const profiles: Record<string, TablePlayerProfile> = {};
+    for (const u of users as any[]) {
+      usernames[u.id] = u.username;
+      const club = u.clubMemberships?.[0]?.club ?? null;
+      profiles[u.id] = {
+        avatarUrl:   u.avatarUrl ?? null,
+        country:     u.country ?? null,
+        level:       u.stats?.level ?? 1,
+        clubId:      club?.id ?? null,
+        clubName:    club?.name ?? null,
+        clubIconUrl: club?.iconUrl ?? null,
+      };
+    }
 
     const seatMap: Record<string, number> = {};
     dbPlayers.forEach((p, i) => { seatMap[p.userId] = i; });
@@ -544,6 +588,7 @@ export class GameEngineService implements OnModuleInit {
       potCollectedByTeam: [],
       seatMap,
       usernames,
+      profiles,
       toss: tossResult,
       setupComplete: true,
       tossComplete: true,
@@ -739,6 +784,11 @@ export class GameEngineService implements OnModuleInit {
    * Public so the gateway can fan a single Redis read out to every socket in a game room
    * (see AppGateway.broadcastGameState) instead of re-reading the state once per player.
    */
+  /** Seat card data for one player; all-null for a state saved before profiles existed. */
+  tableProfileFor(state: Pick<GameState, 'profiles'>, userId: string): TablePlayerProfile {
+    return { ...EMPTY_TABLE_PROFILE, ...(state.profiles?.[userId] ?? {}) };
+  }
+
   buildClientView(state: GameState, requestingUserId: string) {
     const currentPlayerId = state.turnOrder[state.currentTurnIndex] ?? '';
     const topDiscardCard  = state.discardPile.length > 0
@@ -763,6 +813,8 @@ export class GameEngineService implements OnModuleInit {
       id:          p.userId,
       userId:      p.userId,
       username:    state.usernames?.[p.userId] ?? '',
+      // Avatar, flag, level and clan badge for the seat card and the player popup.
+      ...this.tableProfileFor(state, p.userId),
       teamId:      p.teamId,
       isConnected: p.isConnected,
       seatIndex:   state.seatMap?.[p.userId] ?? 0,

@@ -17,6 +17,8 @@ import { MessagingService } from '../modules/messaging/messaging.service';
 import { RedisService } from '../common/redis/redis.service';
 import { ReconnectionService } from '../modules/reconnection/reconnection.service';
 import { RoomsService } from '../modules/rooms/rooms.service';
+import { TableChatService } from '../modules/tables/table-chat.service';
+import { RematchService } from '../modules/tables/rematch.service';
 import { SocketService, userRoom } from '../common/socket/socket.service';
 import { SlidingWindowLimiter } from '../common/rate-limit/sliding-window';
 import { GameStatus, MoveType, RoomStatus } from '@prisma/client';
@@ -46,6 +48,8 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     private roomsService: RoomsService,
     private socketService: SocketService,
     private prisma: PrismaService,
+    private tableChat: TableChatService,
+    private rematch: RematchService,
   ) {}
 
   afterInit(server: Server) {
@@ -308,6 +312,13 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
           username: p.username,
           seatIndex: p.seatIndex,
           teamId: p.teamId,
+          // Seat card: avatar, flag, level, clan badge (see GameEngineService.tableProfileFor).
+          avatarUrl: (p as any).avatarUrl ?? null,
+          country: (p as any).country ?? null,
+          level: (p as any).level ?? 1,
+          clubId: (p as any).clubId ?? null,
+          clubName: (p as any).clubName ?? null,
+          clubIconUrl: (p as any).clubIconUrl ?? null,
         }))
         .sort((a, b) => a.seatIndex - b.seatIndex);
 
@@ -673,6 +684,40 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
       await this.messaging.markAsRead(data?.conversationId, socket.data.userId);
     } catch (err) {
       socket.emit('error', { code: 'CHAT_ERROR', message: (err as Error).message });
+    }
+  }
+
+  // ─── Table chat and rematch (Milestone 5) ────────────────────────────────
+
+  /** `table:chat:send` { gameId, kind?, text } → everyone at the table gets `table:chat:message`. */
+  @SubscribeMessage('table:chat:send')
+  async handleTableChat(@ConnectedSocket() socket: Socket, @MessageBody() data: { gameId: string; kind?: string; text?: string }) {
+    try {
+      await this.tableChat.send(data?.gameId, socket.data.userId, data ?? {});
+    } catch (err) {
+      socket.emit('error', { code: 'TABLE_CHAT_ERROR', message: (err as Error).message });
+    }
+  }
+
+  /** `game:rematch:request` { gameId } — same as POST /game/:id/rematch. */
+  @SubscribeMessage('game:rematch:request')
+  async handleRematchRequest(@ConnectedSocket() socket: Socket, @MessageBody() data: { gameId: string } | string) {
+    const gameId = typeof data === 'string' ? data : data?.gameId;
+    try {
+      await this.rematch.request(gameId, socket.data.userId);
+    } catch (err) {
+      socket.emit('error', { code: 'REMATCH_ERROR', message: (err as Error).message });
+    }
+  }
+
+  /** `game:rematch:decline` { gameId } — same as POST /game/:id/rematch/decline. */
+  @SubscribeMessage('game:rematch:decline')
+  async handleRematchDecline(@ConnectedSocket() socket: Socket, @MessageBody() data: { gameId: string } | string) {
+    const gameId = typeof data === 'string' ? data : data?.gameId;
+    try {
+      await this.rematch.decline(gameId, socket.data.userId);
+    } catch (err) {
+      socket.emit('error', { code: 'REMATCH_ERROR', message: (err as Error).message });
     }
   }
 

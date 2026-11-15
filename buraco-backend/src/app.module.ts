@@ -29,6 +29,7 @@ import { SpecialModule } from './modules/special/special.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
 import { MatchmakingModule } from './modules/matchmaking/matchmaking.module';
 import { RoomsModule } from './modules/rooms/rooms.module';
+import { TablesModule } from './modules/tables/tables.module';
 import { GameEngineModule } from './modules/game-engine/game-engine.module';
 import { MessagingModule } from './modules/messaging/messaging.module';
 import { MatchHistoryModule } from './modules/match-history/match-history.module';
@@ -82,6 +83,7 @@ import { AppGateway } from './websocket/gateway';
     NotificationsModule,
     MatchmakingModule,
     RoomsModule,
+    TablesModule,
     GameEngineModule,
     MessagingModule,
     MatchHistoryModule,
