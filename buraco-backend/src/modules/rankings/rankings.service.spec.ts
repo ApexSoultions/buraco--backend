@@ -6,6 +6,7 @@ import { RankingsService } from './rankings.service';
 // The two leaderboards used to receive the same total points, so they were identical, and
 // only the first page could ever be read. Now:
 // - Classic ranks points earned in Classic matches (PlayerStats.classicPoints)
+// - Hand ranks points earned in Professional matches (PlayerStats.professionalPoints)
 // - International ranks wins across all modes (PlayerStats.wins)
 // - pages after the first return the right players
 // - the Redis sets are rebuilt from the database when they are empty
@@ -35,6 +36,7 @@ function players(count: number) {
   return Array.from({ length: count }, (_, i) => ({
     userId: `u${String(i).padStart(2, '0')}`,
     classicPoints: (count - i) * 10, // u00 has the most Classic points
+    professionalPoints: (i % 3) * 7, // u02 has the most Hand points
     wins: i,                         // u(count-1) has the most wins
   }));
 }
@@ -46,7 +48,7 @@ function setup(rows = players(5)) {
     user: {
       findMany: jest.fn(async ({ where }: any) => rows
         .filter((r) => where.id.in.includes(r.userId))
-        .map((r) => ({ id: r.userId, username: r.userId, avatarUrl: null, stats: { level: 1, classicPoints: r.classicPoints, wins: r.wins }, clubMemberships: [] }))),
+        .map((r) => ({ id: r.userId, username: r.userId, avatarUrl: null, stats: { level: 1, classicPoints: r.classicPoints, professionalPoints: r.professionalPoints, wins: r.wins }, clubMemberships: [] }))),
       findUnique: jest.fn(async ({ where }: any) => {
         const r = rows.find((x) => x.userId === where.id);
         return r ? { id: r.userId, username: r.userId, avatarUrl: null, stats: { level: 1, ...r }, clubMemberships: [] } : null;
@@ -94,6 +96,18 @@ describe('RankingsService', () => {
     expect(intl.meta.sortedBy).toBe('wins');
   });
 
+  it('Hand is ordered by Hand (Professional) points and shows them as the points', async () => {
+    const { service } = setup();
+    await service.rebuild();
+
+    const hand = await service.getHandRanking(1, 5, 'u02');
+    expect(hand.data[0]).toEqual(expect.objectContaining({ rank: 1, score: 14, points: 14 }));
+    expect(hand.data[0]!.user.id).toBe('u02');
+    expect(hand.meta.sortedBy).toBe('professionalPoints');
+    expect(hand.meta.myRank).toBe(1);
+    expect(await service.getPlayerRank('u02', 'hand')).toEqual(expect.objectContaining({ type: 'hand', rank: 1, points: 14 }));
+  });
+
   it('returns the right players on page 2 (it used to be empty)', async () => {
     const { service } = setup(players(25));
     await service.rebuild();
@@ -131,13 +145,14 @@ describe('RankingsService', () => {
 
 describe('StatsService.updateAfterMatch — ranking scores', () => {
   function stats(mode: GameMode | undefined, result: 'WIN' | 'LOSS', points: number) {
-    const row = { userId: 'p1', points: 100, classicPoints: 80, wins: 3, losses: 1, gamesLeft: 0, gamesPlayed: 4, winStreak: 0, bestWinStreak: 1, experience: 0, level: 1 };
+    const row = { userId: 'p1', points: 100, classicPoints: 80, professionalPoints: 30, wins: 3, losses: 1, gamesLeft: 0, gamesPlayed: 4, winStreak: 0, bestWinStreak: 1, experience: 0, level: 1 };
     const prisma = {
       playerStats: {
         findUnique: jest.fn(async () => ({ ...row })),
         update: jest.fn(async ({ data }: any) => ({
           ...row, ...data,
           classicPoints: row.classicPoints + (data.classicPoints?.increment ?? 0),
+          professionalPoints: row.professionalPoints + (data.professionalPoints?.increment ?? 0),
         })),
       },
     };
@@ -152,11 +167,12 @@ describe('StatsService.updateAfterMatch — ranking scores', () => {
     expect(redis.sets.get(RANKING_KEYS.international)!.get('p1')).toBe(4);
   });
 
-  it('a Professional win counts for International only', async () => {
+  it('a Professional win adds to Hand points and International wins, not Classic', async () => {
     const { run, redis, prisma } = stats(GameMode.PROFESSIONAL, 'WIN', 60);
     await run();
     expect(prisma.playerStats.update.mock.calls[0][0].data.classicPoints).toBeUndefined();
     expect(redis.sets.get(RANKING_KEYS.classic)!.get('p1')).toBe(80);
+    expect(redis.sets.get(RANKING_KEYS.hand)!.get('p1')).toBe(90);
     expect(redis.sets.get(RANKING_KEYS.international)!.get('p1')).toBe(4);
   });
 

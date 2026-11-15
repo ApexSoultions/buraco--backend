@@ -7,7 +7,7 @@ const MAX_PAGE_SIZE = 100;
 
 /** Bump RANKING_SCHEME whenever what the ranking sets hold changes; startup then rebuilds them. */
 const RANKING_SCHEME_KEY = 'ranking:scheme';
-const RANKING_SCHEME = 'classicPoints+wins/v2';
+const RANKING_SCHEME = 'classicPoints+professionalPoints+wins/v3';
 
 @Injectable()
 export class RankingsService implements OnModuleInit {
@@ -26,27 +26,30 @@ export class RankingsService implements OnModuleInit {
    */
   async onModuleInit() {
     try {
-      const [classic, international, version] = await Promise.all([
+      const [classic, hand, international, version] = await Promise.all([
         this.redis.zcard(RANKING_KEYS.classic),
+        this.redis.zcard(RANKING_KEYS.hand),
         this.redis.zcard(RANKING_KEYS.international),
         this.redis.get(RANKING_SCHEME_KEY),
       ]);
-      if (classic === 0 || international === 0 || version !== RANKING_SCHEME) await this.rebuild();
+      if (classic === 0 || hand === 0 || international === 0 || version !== RANKING_SCHEME) await this.rebuild();
     } catch (err) {
       this.logger.error('Ranking rebuild at startup failed', err as Error);
     }
   }
 
-  /** Recompute both ranking sets from the database. Safe to run any time. */
+  /** Recompute the ranking sets from the database. Safe to run any time. */
   async rebuild() {
     const rows = await this.prisma.playerStats.findMany({
       where: { user: { isDeleted: false } },
-      select: { userId: true, classicPoints: true, wins: true },
+      select: { userId: true, classicPoints: true, professionalPoints: true, wins: true },
     });
     await this.redis.del(RANKING_KEYS.classic);
+    await this.redis.del(RANKING_KEYS.hand);
     await this.redis.del(RANKING_KEYS.international);
     for (const r of rows) {
       await this.redis.zadd(RANKING_KEYS.classic, r.classicPoints, r.userId);
+      await this.redis.zadd(RANKING_KEYS.hand, r.professionalPoints, r.userId);
       await this.redis.zadd(RANKING_KEYS.international, r.wins, r.userId);
     }
     await this.redis.set(RANKING_SCHEME_KEY, RANKING_SCHEME);
@@ -56,6 +59,11 @@ export class RankingsService implements OnModuleInit {
 
   async getClassicRanking(page = 1, limit = 50, requestingUserId?: string) {
     return this.getRanking('classic', page, limit, requestingUserId);
+  }
+
+  /** The game's "Hand" ranking: points earned in Professional-mode matches. */
+  async getHandRanking(page = 1, limit = 50, requestingUserId?: string) {
+    return this.getRanking('hand', page, limit, requestingUserId);
   }
 
   async getInternationalRanking(page = 1, limit = 50, requestingUserId?: string) {
@@ -80,10 +88,10 @@ export class RankingsService implements OnModuleInit {
         username: true,
         avatarUrl: true,
         country: true,
-        stats: { select: { level: true, classicPoints: true, wins: true } },
+        stats: { select: { level: true, classicPoints: true, professionalPoints: true, wins: true } },
         clubMemberships: {
           where: { status: 'ACTIVE' },
-          select: { role: true, club: { select: { name: true } } },
+          select: { role: true, club: { select: { id: true, name: true, iconUrl: true } } },
           take: 1,
         },
       },
@@ -96,12 +104,12 @@ export class RankingsService implements OnModuleInit {
       const membership = user.clubMemberships[0];
       return {
         rank: offset + idx + 1,
-        user: { id: user.id, username: user.username, avatarUrl: user.avatarUrl, level: user.stats?.level },
-        // `score` is what this leaderboard is sorted by: Classic points, or total wins.
+        user: { id: user.id, username: user.username, avatarUrl: user.avatarUrl, level: user.stats?.level, country: user.country },
+        // `score` is what this leaderboard is sorted by: Classic or Hand points, or total wins.
         score: entry.score,
-        points: user.stats?.classicPoints ?? 0,
+        points: type === 'hand' ? user.stats?.professionalPoints ?? 0 : user.stats?.classicPoints ?? 0,
         wins: user.stats?.wins ?? 0,
-        club: membership ? { name: membership.club.name, role: membership.role } : null,
+        club: membership ? { id: membership.club.id, name: membership.club.name, iconUrl: membership.club.iconUrl, role: membership.role } : null,
       };
     }).filter(Boolean);
 
@@ -115,7 +123,7 @@ export class RankingsService implements OnModuleInit {
       data: ranked,
       meta: {
         type,
-        sortedBy: type === 'classic' ? 'classicPoints' : 'wins',
+        sortedBy: type === 'classic' ? 'classicPoints' : type === 'hand' ? 'professionalPoints' : 'wins',
         total, page, limit,
         totalPages: Math.ceil(total / limit),
         myRank,
@@ -124,7 +132,7 @@ export class RankingsService implements OnModuleInit {
   }
 
   async getPlayerRank(userId: string, type: string = 'classic') {
-    if (type !== 'classic' && type !== 'international') throw new BadRequestException('type must be classic or international');
+    if (type !== 'classic' && type !== 'hand' && type !== 'international') throw new BadRequestException('type must be classic, hand or international');
     const key = RANKING_KEYS[type];
     const rank = await this.redis.zrevrank(key, userId);
     const score = await this.redis.zscore(key, userId);
@@ -133,7 +141,7 @@ export class RankingsService implements OnModuleInit {
       where: { id: userId },
       select: {
         id: true, username: true, avatarUrl: true,
-        stats: { select: { level: true, points: true, classicPoints: true, gamesPlayed: true, wins: true, winPercentage: true } },
+        stats: { select: { level: true, points: true, classicPoints: true, professionalPoints: true, gamesPlayed: true, wins: true, winPercentage: true } },
         clubMemberships: {
           where: { status: 'ACTIVE' },
           select: { role: true, club: { select: { id: true, name: true } } },
@@ -147,7 +155,7 @@ export class RankingsService implements OnModuleInit {
       type,
       rank: rank !== null ? rank + 1 : null,
       score: score ? parseInt(score, 10) : 0,
-      points: user?.stats?.classicPoints ?? 0,
+      points: (type === 'hand' ? user?.stats?.professionalPoints : user?.stats?.classicPoints) ?? 0,
       wins: user?.stats?.wins ?? 0,
       user: { id: user?.id, username: user?.username, avatarUrl: user?.avatarUrl, level: user?.stats?.level },
       stats: user?.stats,

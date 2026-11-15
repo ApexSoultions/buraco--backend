@@ -5,11 +5,15 @@ import { RedisService } from '../../common/redis/redis.service';
 
 /**
  * Redis sorted sets behind the leaderboards:
- * - classic: points earned in Classic-mode matches (PlayerStats.classicPoints)
+ * - classic: points earned in Classic-mode matches (PlayerStats.classicPoints), the
+ *   game's "Barasilian" ranking
+ * - hand: points earned in Professional-mode matches (PlayerStats.professionalPoints), the
+ *   game's "Hand" ranking
  * - international: wins across all modes (PlayerStats.wins)
  */
 export const RANKING_KEYS = {
   classic: 'ranking:classic',
+  hand: 'ranking:hand',
   international: 'ranking:international',
 } as const;
 export type RankingType = keyof typeof RANKING_KEYS;
@@ -81,6 +85,7 @@ export class StatsService {
         experience: newXP,
         points: newPoints,
         ...(mode === GameMode.CLASSIC && pointsEarned > 0 && { classicPoints: { increment: pointsEarned } }),
+        ...(mode === GameMode.PROFESSIONAL && pointsEarned > 0 && { professionalPoints: { increment: pointsEarned } }),
         level: newLevel,
         winPercentage: Math.round(newWinPct * 100) / 100,
       },
@@ -103,8 +108,9 @@ export class StatsService {
    * Write a player's scores into both ranking sets. They used to receive the same total
    * points, which made the two leaderboards identical.
    */
-  async syncRankings(stats: { userId: string; classicPoints: number; wins: number }) {
+  async syncRankings(stats: { userId: string; classicPoints: number; professionalPoints: number; wins: number }) {
     await this.redis.zadd(RANKING_KEYS.classic, stats.classicPoints, stats.userId);
+    await this.redis.zadd(RANKING_KEYS.hand, stats.professionalPoints, stats.userId);
     await this.redis.zadd(RANKING_KEYS.international, stats.wins, stats.userId);
   }
 
