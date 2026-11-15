@@ -64,6 +64,12 @@ export class TableChatService {
     return { state, teamId: me.teamId };
   }
 
+  /** The Create Table "Text Chat" / "Voice Chat" switches of the table this match is at. */
+  async chatSwitches(gameId: string): Promise<{ textChat: boolean; voiceChat: boolean }> {
+    const room = await this.prisma.room.findFirst({ where: { gameId }, select: { textChat: true, voiceChat: true } });
+    return { textChat: room?.textChat ?? true, voiceChat: room?.voiceChat ?? true };
+  }
+
   private async append(msg: TableChatMessage) {
     const key = this.chatKey(msg.gameId);
     const list = (await this.redis.getJson<TableChatMessage[]>(key)) ?? [];
@@ -86,6 +92,7 @@ export class TableChatService {
     if (text.length > (kind === 'TEXT' ? TABLE_CHAT_MAX_TEXT : 40)) throw new BadRequestException('MESSAGE_TOO_LONG');
 
     const { state, teamId } = await this.seatOf(gameId, userId);
+    if (!(await this.chatSwitches(gameId)).textChat) throw new ForbiddenException('TEXT_CHAT_OFF');
     this.rateLimit(userId);
     return this.append({
       id: uuidv4(), gameId, senderId: userId, username: state.usernames?.[userId] ?? '', teamId,
@@ -96,6 +103,7 @@ export class TableChatService {
   /** Called before the upload, so strangers and non-subscribers cannot fill the bucket. */
   async assertCanSendVoice(gameId: string, userId: string) {
     await this.seatOf(gameId, userId);
+    if (!(await this.chatSwitches(gameId)).voiceChat) throw new ForbiddenException('VOICE_CHAT_OFF');
     const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { voiceChatExpiry: true } });
     if (!isVoiceChatActive(user)) throw new ForbiddenException('VOICE_CHAT_REQUIRED');
     this.rateLimit(userId);
@@ -112,7 +120,8 @@ export class TableChatService {
   async history(gameId: string, userId: string) {
     await this.seatOf(gameId, userId);
     const list = (await this.redis.getJson<TableChatMessage[]>(this.chatKey(gameId))) ?? [];
-    return this.withVoiceLinks(list);
+    // The switches tell the client whether to show the chat / mic buttons at all.
+    return { ...(await this.chatSwitches(gameId)), messages: await this.withVoiceLinks(list) };
   }
 
   private async withVoiceLinks(messages: TableChatMessage[]): Promise<TableChatMessage[]> {

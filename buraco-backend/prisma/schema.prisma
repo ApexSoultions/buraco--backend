@@ -779,6 +779,11 @@ model Room {
   tableLabel         String?
   tableOwnerUserId   String?
   tableOwnerUsername String?
+  /// Private table: bcrypt hash of the password the owner set; null = open table.
+  passwordHash       String?
+  /// Create Table "Text Chat" / "Voice Chat" switches for the match at this table.
+  textChat           Boolean     @default(true)
+  voiceChat          Boolean     @default(true)
   createdAt          DateTime    @default(now())
   updatedAt          DateTime    @updatedAt
 

@@ -155,10 +155,10 @@ export class TableInvitesService {
     try {
       let joined: any;
       try {
-        joined = await this.rooms.joinRoom(userId, inv.roomId, inv.seatIndex ?? undefined);
+        joined = await this.rooms.joinRoom(userId, inv.roomId, inv.seatIndex ?? undefined, { trusted: true });
       } catch (err) {
         if (inv.seatIndex === null || (err as Error).message !== 'SEAT_TAKEN') throw err;
-        joined = await this.rooms.joinRoom(userId, inv.roomId);
+        joined = await this.rooms.joinRoom(userId, inv.roomId, undefined, { trusted: true });
       }
       await this.answer(inv, true);
       return joined;

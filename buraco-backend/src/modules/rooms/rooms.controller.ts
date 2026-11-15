@@ -43,6 +43,9 @@ export class RoomsController {
         endMode:       { type: 'string', enum: ['DIRECT', 'INDIRECT'], description: 'Professional only: end mode' },
         makart:        { type: 'boolean', description: 'Professional only: enable Makart rules' },
         targetScore:   { type: 'number', description: 'Match target score. 0 = One Hand (single round). Positive = play until a team reaches this score (e.g. 100, 500, 2000).' },
+        password:      { type: 'string', description: 'Private table (3-20 characters). Others must send it to join; invited friends do not.' },
+        textChat:      { type: 'boolean', description: 'Table chat on (default true)' },
+        voiceChat:     { type: 'boolean', description: 'Voice clips in table chat (default true)' },
       },
       required: ['mode', 'variant'],
     },
@@ -62,18 +65,20 @@ export class RoomsController {
       type: 'object',
       properties: {
         requestedSeatIndex: { type: 'number', enum: [0, 1, 2, 3], description: 'Desired seat (TWO_VS_TWO only). Seat 0 & 2 = team 1, seat 1 & 3 = team 2.' },
+        password: { type: 'string', description: 'Needed when the room has hasPassword=true' },
       },
     },
   })
   @ApiResponse({ status: 200, description: 'Joined room. Response includes seatIndex and teamId. Connect via WebSocket room:join event.' })
   @ApiResponse({ status: 400, description: 'Room full, seat taken, seat selection not supported for 1v1, or requirements not met' })
+  @ApiResponse({ status: 403, description: 'PASSWORD_REQUIRED | WRONG_PASSWORD' })
   @ApiResponse({ status: 404, description: 'Room not found' })
   joinRoom(
     @CurrentUser('id') userId: string,
     @Param('roomId') roomId: string,
-    @Body() body: { requestedSeatIndex?: number },
+    @Body() body: { requestedSeatIndex?: number; password?: string },
   ) {
-    return this.roomsService.joinRoom(userId, roomId, body?.requestedSeatIndex);
+    return this.roomsService.joinRoom(userId, roomId, body?.requestedSeatIndex, { password: body?.password });
   }
 
   @Post('leave-all-lobby')

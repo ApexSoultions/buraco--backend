@@ -13,6 +13,7 @@ import { GameEngineService } from '../game-engine/game-engine.service';
 import { RedisService } from '../../common/redis/redis.service';
 import { isPremiumActive } from '../../common/premium/premium';
 import { SocketService } from '../../common/socket/socket.service';
+import * as bcrypt from 'bcryptjs';
 
 interface CreateRoomOptions {
   mode: GameMode;
@@ -24,6 +25,23 @@ interface CreateRoomOptions {
   endMode?: string;
   makart?: boolean;
   targetScore?: number;
+  /** Private table: players must type this to sit (invited friends and rematches skip it). */
+  password?: string | null;
+  textChat?: boolean;
+  voiceChat?: boolean;
+}
+
+export interface JoinRoomOptions {
+  password?: string;
+  /** Invite accept / rematch: the table already knows this player, no password asked. */
+  trusted?: boolean;
+}
+
+/** Never send the password hash out; say only whether the table has one. */
+export function publicRoom<T extends { passwordHash?: string | null } | null | undefined>(room: T) {
+  if (!room) return room as any;
+  const { passwordHash, ...rest } = room as any;
+  return { ...rest, hasPassword: !!passwordHash };
 }
 
 interface SeatEntry {
@@ -282,7 +300,7 @@ export class RoomsService implements OnModuleInit {
     });
 
     seatList.sort((a, b) => a.seatIndex - b.seatIndex);
-    return { ...room, seats, seatList };
+    return { ...publicRoom(room), seats, seatList };
   }
 
   // Single instance-wide sweep for lobby seats left behind by a disconnect that
@@ -413,13 +431,30 @@ export class RoomsService implements OnModuleInit {
         endMode: isProfessional ? (opts.endMode ?? null) : null,
         makart: isProfessional ? (opts.makart ?? false) : false,
         targetScore: opts.targetScore ?? 0,
+        passwordHash: await this.hashTablePassword(opts.password),
+        textChat: opts.textChat ?? true,
+        voiceChat: opts.voiceChat ?? true,
       } as any,
     });
     // Creator always gets seat 0 (team 1)
-    return this.joinRoom(userId, room.id, 0);
+    return this.joinRoom(userId, room.id, 0, { trusted: true });
   }
 
-  async joinRoom(userId: string, roomId: string, requestedSeatIndex?: number) {
+  private async hashTablePassword(raw?: string | null): Promise<string | null> {
+    const pw = (raw ?? '').trim();
+    if (!pw) return null;
+    if (pw.length < 3 || pw.length > 20) throw new BadRequestException('PASSWORD_LENGTH');
+    return bcrypt.hash(pw, 8);
+  }
+
+  async joinRoom(userId: string, roomId: string, requestedSeatIndex?: number, opts: JoinRoomOptions = {}) {
+    // Check the password before evicting the player from the table they are at now.
+    const locked = await this.prisma.room.findUnique({ where: { id: roomId }, select: { passwordHash: true } });
+    if (locked?.passwordHash && !opts.trusted) {
+      if (!opts.password) throw new ForbiddenException('PASSWORD_REQUIRED');
+      if (!(await bcrypt.compare(opts.password.trim(), locked.passwordHash))) throw new ForbiddenException('WRONG_PASSWORD');
+    }
+
     // Enforce one lobby seat per user — remove any ghost seats in other rooms first
     await this.evictFromAllLobbyRooms(userId, roomId);
 
@@ -501,7 +536,7 @@ export class RoomsService implements OnModuleInit {
     // Re-fetch so the HTTP response reflects gameId + IN_PROGRESS when game just started
     const finalRoom = await this.prisma.room.findUnique({ where: { id: roomId } }) ?? updatedRoom;
     const teamId = assignedSeat % 2 === 0 ? 1 : 2;
-    return { ...finalRoom, seatIndex: assignedSeat, teamId };
+    return { ...publicRoom(finalRoom), seatIndex: assignedSeat, teamId };
   }
 
   async switchSeat(userId: string, roomId: string, requestedSeatIndex: number) {
@@ -563,7 +598,7 @@ export class RoomsService implements OnModuleInit {
 
     // Recalculate from actual seat count — no drift possible
     const updatedRoom = await this.recalculateAndSyncRoom(room);
-    return updatedRoom ?? { ...room, currentPlayers: 0, status: RoomStatus.EMPTY };
+    return publicRoom(updatedRoom ?? { ...room, currentPlayers: 0, status: RoomStatus.EMPTY });
   }
 
   async leaveAllLobby(userId: string) {

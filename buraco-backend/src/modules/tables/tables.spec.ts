@@ -85,7 +85,7 @@ describe('TableInvitesService', () => {
     expect(await service.getMyInvites(BOB)).toHaveLength(1);
 
     await service.accept(BOB, inv.id);
-    expect(rooms.joinRoom).toHaveBeenCalledWith(BOB, 'room-1', 2);
+    expect(rooms.joinRoom).toHaveBeenCalledWith(BOB, 'room-1', 2, { trusted: true });
     expect(sock.emitToUsers).toHaveBeenCalledWith([ALICE], 'room:invite_answer', expect.objectContaining({ accepted: true, toUserId: BOB }));
     expect(await service.getMyInvites(BOB)).toHaveLength(0);
     await expect(service.accept(BOB, inv.id)).rejects.toBeInstanceOf(NotFoundException);
@@ -96,7 +96,7 @@ describe('TableInvitesService', () => {
     const inv = await service.sendInvite(ALICE, { roomId: 'room-1', friendId: BOB, seatIndex: 2 });
     rooms.joinRoom.mockRejectedValueOnce(new BadRequestException('SEAT_TAKEN'));
     await service.accept(BOB, inv.id);
-    expect(rooms.joinRoom).toHaveBeenLastCalledWith(BOB, 'room-1');
+    expect(rooms.joinRoom).toHaveBeenLastCalledWith(BOB, 'room-1', undefined, { trusted: true });
   });
 
   it('only the invited player can answer; decline tells the inviter', async () => {
@@ -119,11 +119,14 @@ function gameState(status: GameStatus = GameStatus.IN_PROGRESS) {
   };
 }
 
-function chatSetup(voiceExpiry: Date | null = null) {
+function chatSetup(voiceExpiry: Date | null = null, switches: any = { textChat: true, voiceChat: true }) {
   const redis = fakeRedis();
   redis.kv.set('game:g1:state', JSON.stringify(gameState()));
   const sock = socket();
-  const prisma = { user: { findUnique: jest.fn(async () => ({ voiceChatExpiry: voiceExpiry })) } };
+  const prisma = {
+    user: { findUnique: jest.fn(async () => ({ voiceChatExpiry: voiceExpiry })) },
+    room: { findFirst: jest.fn(async () => switches) },
+  };
   const s3 = { signUrls: jest.fn(async (keys: string[]) => new Map(keys.map((k) => [k, `https://signed/${k}`]))) };
   const service = new TableChatService(prisma as any, redis as any, sock as any, s3 as any, engine as any);
   return { service, sock };
@@ -135,7 +138,7 @@ describe('TableChatService', () => {
     const msg = await service.send('g1', ALICE, { text: '  good luck  ' });
     expect(msg).toMatchObject({ senderId: ALICE, username: 'alice', teamId: 1, kind: 'TEXT', text: 'good luck' });
     expect(sock.emitToRoom).toHaveBeenCalledWith('game:g1', 'table:chat:message', msg);
-    expect(await service.history('g1', BOB)).toHaveLength(1);
+    expect(await service.history('g1', BOB)).toMatchObject({ textChat: true, voiceChat: true, messages: [msg] });
   });
 
   it('refuses strangers, empty and over-long messages, unknown kinds', async () => {
@@ -146,6 +149,12 @@ describe('TableChatService', () => {
     await expect(service.send('g1', ALICE, { text: 'x'.repeat(201) })).rejects.toThrow('MESSAGE_TOO_LONG');
     await expect(service.send('g1', ALICE, { kind: 'VOICE', text: 'x' })).rejects.toThrow('INVALID_KIND');
     await expect(service.send('nope', ALICE, { text: 'hi' })).rejects.toThrow('GAME_NOT_FOUND');
+  });
+
+  it('respects the table Text Chat / Voice Chat switches', async () => {
+    const off = chatSetup(new Date(Date.now() + 86400_000), { textChat: false, voiceChat: false });
+    await expect(off.service.send('g1', ALICE, { text: 'hi' })).rejects.toThrow('TEXT_CHAT_OFF');
+    await expect(off.service.assertCanSendVoice('g1', ALICE)).rejects.toThrow('VOICE_CHAT_OFF');
   });
 
   it('voice needs the Voice chat subscription and is sent as a signed link', async () => {
@@ -192,8 +201,8 @@ describe('RematchService', () => {
 
     const done = await service.request('g1', BOB);
     expect(prisma.room.create).toHaveBeenCalledWith({ data: expect.objectContaining({ mode: 'CLASSIC', variant: 'ONE_VS_ONE', maxPlayers: 2, isDefaultTable: false }) });
-    expect(rooms.joinRoom).toHaveBeenNthCalledWith(1, ALICE, 'new-room', 0);
-    expect(rooms.joinRoom).toHaveBeenNthCalledWith(2, BOB, 'new-room', 1);
+    expect(rooms.joinRoom).toHaveBeenNthCalledWith(1, ALICE, 'new-room', 0, { trusted: true });
+    expect(rooms.joinRoom).toHaveBeenNthCalledWith(2, BOB, 'new-room', 1, { trusted: true });
     expect(done).toMatchObject({ status: 'STARTED', roomId: 'new-room', newGameId: 'g2' });
     expect(sock.emitToRoom).toHaveBeenCalledWith('game:g1', 'game:rematch:start', expect.objectContaining({ newGameId: 'g2' }));
   });

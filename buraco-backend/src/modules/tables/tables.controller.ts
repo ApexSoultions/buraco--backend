@@ -72,7 +72,7 @@ export class TableSocialController {
   // ── Table chat ────────────────────────────────────────────────────────────
 
   @Get(':gameId/chat')
-  @ApiOperation({ summary: 'Last 50 table chat messages (players of this match only)' })
+  @ApiOperation({ summary: 'Table chat: { textChat, voiceChat, messages } (last 50; players of this match only)' })
   @ApiParam({ name: 'gameId' })
   chatHistory(@CurrentUser('id') userId: string, @Param('gameId') gameId: string) {
     return this.chat.history(gameId, userId);

@@ -148,6 +148,10 @@ export class RematchService {
         endMode: oldRoom?.endMode ?? (state.mode === 'PROFESSIONAL' ? state.endMode : null),
         makart: state.makart ?? false,
         targetScore: state.targetScore ?? 0,
+        // Same private table: keep the password and the chat switches.
+        passwordHash: oldRoom?.passwordHash ?? null,
+        textChat: oldRoom?.textChat ?? true,
+        voiceChat: oldRoom?.voiceChat ?? true,
       } as any,
     });
 
@@ -157,7 +161,7 @@ export class RematchService {
     const seated: string[] = [];
     try {
       for (const p of seatOrder) {
-        await this.rooms.joinRoom(p.userId, room.id, state.seatMap?.[p.userId]);
+        await this.rooms.joinRoom(p.userId, room.id, state.seatMap?.[p.userId], { trusted: true });
         seated.push(p.userId);
       }
     } catch (err) {
