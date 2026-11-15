@@ -118,6 +118,13 @@ export class TableSocialController {
     return this.chat.sendVoice(gameId, userId, key, Math.max(1, Math.round(seconds)));
   }
 
+  @Post(':gameId/chat/report')
+  @ApiOperation({ summary: 'Report a player at this table for their chat (saved with their recent table messages)' })
+  @ApiBody({ schema: { type: 'object', required: ['userId'], properties: { userId: { type: 'string' }, reason: { type: 'string', enum: ['SPAM', 'ABUSE', 'INAPPROPRIATE', 'CHEATING', 'OTHER'] } } } })
+  reportChat(@CurrentUser('id') userId: string, @Param('gameId') gameId: string, @Body() body: { userId?: string; reason?: string }) {
+    return this.chat.report(gameId, userId, body);
+  }
+
   // ── Rematch ───────────────────────────────────────────────────────────────
 
   @Get(':gameId/rematch')

@@ -15,6 +15,7 @@ export const TABLE_CHAT_MAX_TEXT = 200;
 /** How many messages a player sees when they open (or reopen) the chat. */
 export const TABLE_CHAT_HISTORY = 50;
 export const TABLE_CHAT_MAX_VOICE_SECONDS = 30;
+const REPORT_REASONS = ['SPAM', 'ABUSE', 'INAPPROPRIATE', 'CHEATING', 'OTHER'];
 
 export interface TableChatMessage {
   id: string;
@@ -122,6 +123,30 @@ export class TableChatService {
     const list = (await this.redis.getJson<TableChatMessage[]>(this.chatKey(gameId))) ?? [];
     // The switches tell the client whether to show the chat / mic buttons at all.
     return { ...(await this.chatSwitches(gameId)), messages: await this.withVoiceLinks(list) };
+  }
+
+  /**
+   * Report a player for what they wrote at this table. Saved as an ordinary player report
+   * (admin "reports" list) with their recent table messages as the details.
+   */
+  async report(gameId: string, userId: string, body: { userId?: string; reason?: string }) {
+    const reportedUserId = body?.userId;
+    const reason = (body?.reason ?? 'ABUSE').toUpperCase();
+    if (!reportedUserId) throw new BadRequestException('userId is required');
+    if (reportedUserId === userId) throw new BadRequestException('CANNOT_REPORT_SELF');
+    if (!REPORT_REASONS.includes(reason)) throw new BadRequestException('INVALID_REASON');
+    const { state } = await this.seatOf(gameId, userId);
+    if (!state.players.some((p) => p.userId === reportedUserId)) throw new BadRequestException('NOT_AT_TABLE');
+
+    const list = (await this.redis.getJson<TableChatMessage[]>(this.chatKey(gameId))) ?? [];
+    const theirs = list.filter((m) => m.senderId === reportedUserId).slice(-10)
+      .map((m) => (m.kind === 'VOICE' ? `[voice ${m.duration ?? 0}s]` : m.text));
+    const details = `Table chat, match ${gameId}:\n${theirs.join('\n') || '(no messages)'}`.slice(0, 2000);
+
+    await this.prisma.report.create({
+      data: { reporterId: userId, reportedUserId, reason: reason as any, details },
+    });
+    return { success: true };
   }
 
   private async withVoiceLinks(messages: TableChatMessage[]): Promise<TableChatMessage[]> {

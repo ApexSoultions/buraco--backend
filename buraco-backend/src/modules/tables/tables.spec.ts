@@ -126,10 +126,11 @@ function chatSetup(voiceExpiry: Date | null = null, switches: any = { textChat: 
   const prisma = {
     user: { findUnique: jest.fn(async () => ({ voiceChatExpiry: voiceExpiry })) },
     room: { findFirst: jest.fn(async () => switches) },
+    report: { create: jest.fn(async () => ({})) },
   };
   const s3 = { signUrls: jest.fn(async (keys: string[]) => new Map(keys.map((k) => [k, `https://signed/${k}`]))) };
   const service = new TableChatService(prisma as any, redis as any, sock as any, s3 as any, engine as any);
-  return { service, sock };
+  return { service, sock, prisma };
 }
 
 describe('TableChatService', () => {
@@ -149,6 +150,16 @@ describe('TableChatService', () => {
     await expect(service.send('g1', ALICE, { text: 'x'.repeat(201) })).rejects.toThrow('MESSAGE_TOO_LONG');
     await expect(service.send('g1', ALICE, { kind: 'VOICE', text: 'x' })).rejects.toThrow('INVALID_KIND');
     await expect(service.send('nope', ALICE, { text: 'hi' })).rejects.toThrow('GAME_NOT_FOUND');
+  });
+
+  it('reports a player at the table with their recent messages', async () => {
+    const { service, prisma } = chatSetup();
+    await service.send('g1', BOB, { text: 'bad words' });
+    await service.report('g1', ALICE, { userId: BOB, reason: 'abuse' });
+    expect(prisma.report.create).toHaveBeenCalledWith({ data: expect.objectContaining({
+      reporterId: ALICE, reportedUserId: BOB, reason: 'ABUSE', details: expect.stringContaining('bad words') }) });
+    await expect(service.report('g1', ALICE, { userId: ALICE })).rejects.toThrow('CANNOT_REPORT_SELF');
+    await expect(service.report('g1', ALICE, { userId: CARL })).rejects.toThrow('NOT_AT_TABLE');
   });
 
   it('respects the table Text Chat / Voice Chat switches', async () => {
