@@ -1,5 +1,6 @@
-import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { ApiBearerAuth, ApiBody, ApiConsumes, ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -38,6 +39,17 @@ export class ClubSocialController {
     private readonly objectives: ClubObjectivesService,
     private readonly prisma: PrismaService,
   ) {}
+
+  // ── Picture ──────────────────────────────────────────────────────────────
+
+  @Post(':clubId/icon')
+  @ApiOperation({ summary: 'Upload the club picture (Leader; JPG/PNG/WebP, max 5 MB)' })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({ schema: { type: 'object', required: ['file'], properties: { file: { type: 'string', format: 'binary' } } } })
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 5 * 1024 * 1024 } }))
+  uploadIcon(@CurrentUser('id') userId: string, @Param('clubId', new ParseUUIDPipe()) clubId: string, @UploadedFile() file: Express.Multer.File) {
+    return this.clubs.uploadIcon(userId, clubId, file);
+  }
 
   // ── Invites ──────────────────────────────────────────────────────────────
 

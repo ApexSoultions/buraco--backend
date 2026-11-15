@@ -1,6 +1,8 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { ClubInviteStatus, ClubObjective, ClubRole, ClubType, MemberStatus, MissionRequirement, NotificationType, Prisma, TransactionType } from '@prisma/client';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import { S3Service } from '../../common/s3/s3.service';
+import { v4 as uuidv4 } from 'uuid';
 import { MatchProgress, MissionsService, matchChanges } from '../missions/missions.service';
 import { EconomyService } from '../economy/economy.service';
 import { ClubFeedService } from './club-feed.service';
@@ -36,7 +38,23 @@ export class ClubsService {
     @Optional() private feed?: ClubFeedService,
     @Optional() private objectives?: ClubObjectivesService,
     @Optional() private economy?: EconomyService,
+    @Optional() private s3?: S3Service,
   ) {}
+
+  /**
+   * The club picture (Create / Modify Clan "Upload"): leader only. Stored under avatars/
+   * so it is public like player avatars, and saved as the club's iconUrl.
+   */
+  async uploadIcon(userId: string, clubId: string, file?: Express.Multer.File) {
+    if (!file) throw new BadRequestException('No picture provided');
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype)) throw new BadRequestException('Pictures must be JPG, PNG or WebP');
+    if (!this.s3) throw new BadRequestException('Picture upload is not available');
+    await this.requireRole(userId, clubId, [ClubRole.LEADER]);
+    const ext = file.mimetype === 'image/png' ? 'png' : file.mimetype === 'image/webp' ? 'webp' : 'jpg';
+    const iconUrl = await this.s3.upload(`avatars/clubs/${clubId}/${uuidv4()}.${ext}`, file.buffer, file.mimetype);
+    await this.prisma.club.update({ where: { id: clubId }, data: { iconUrl } });
+    return { iconUrl };
+  }
 
   async createClub(userId: string, dto: CreateClubDto) {
     const existing = await this.prisma.club.findUnique({ where: { name: dto.name } });
