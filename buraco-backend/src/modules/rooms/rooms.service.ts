@@ -50,7 +50,22 @@ interface SeatEntry {
   userId: string;
   username: string;
   isConnected: boolean;
+  /** Table-list seat card (Figma "Join Existing Tables"): picture, level, clan. */
+  avatarUrl?: string | null;
+  level?: number;
+  clubName?: string | null;
+  clubIconUrl?: string | null;
 }
+
+/** What a seated player's card in the table list shows. Cached briefly: the list is polled often. */
+interface SeatProfile {
+  avatarUrl: string | null;
+  level: number;
+  clubName: string | null;
+  clubIconUrl: string | null;
+}
+
+const SEAT_PROFILE_TTL_SECONDS = 60;
 
 const DEFAULT_TABLES = [
   { mode: GameMode.CLASSIC,      variant: GameVariant.ONE_VS_ONE, label: 'Classic 1v1',       endMode: null,     makart: false },
@@ -275,6 +290,50 @@ export class RoomsService implements OnModuleInit {
 
   // ── Seat enrichment ────────────────────────────────────────────────────────
 
+  /** Picture, level and clan of seated players: from a short Redis cache, the rest in one query. */
+  private async seatProfiles(userIds: string[]): Promise<Record<string, SeatProfile>> {
+    const out: Record<string, SeatProfile> = {};
+    const ids = [...new Set(userIds.filter(Boolean))];
+    if (ids.length === 0) return out;
+
+    const cached = await this.redis.mget(ids.map((id) => `seatprofile:${id}`));
+    const missing: string[] = [];
+    ids.forEach((id, i) => {
+      const raw = cached?.[i];
+      if (raw) {
+        try { out[id] = JSON.parse(raw); return; } catch { /* fall through and reload */ }
+      }
+      missing.push(id);
+    });
+    if (missing.length === 0) return out;
+
+    const users = await this.prisma.user.findMany({
+      where: { id: { in: missing } },
+      select: {
+        id: true,
+        avatarUrl: true,
+        stats: { select: { level: true } },
+        clubMemberships: {
+          where: { status: 'ACTIVE' },
+          take: 1,
+          select: { club: { select: { name: true, iconUrl: true } } },
+        },
+      },
+    });
+    for (const u of users as any[]) {
+      const club = u.clubMemberships?.[0]?.club ?? null;
+      const profile: SeatProfile = {
+        avatarUrl: u.avatarUrl ?? null,
+        level: u.stats?.level ?? 1,
+        clubName: club?.name ?? null,
+        clubIconUrl: club?.iconUrl ?? null,
+      };
+      out[u.id] = profile;
+      await this.redis.setJson(`seatprofile:${u.id}`, profile, SEAT_PROFILE_TTL_SECONDS);
+    }
+    return out;
+  }
+
   async enrichRoomWithSeats(room: any) {
     const hash = (await this.redis.hgetall(this.seatsKey(room.id))) ?? {};
 
@@ -283,7 +342,9 @@ export class RoomsService implements OnModuleInit {
     // Batched lookup — a single MGET instead of one GET per occupied seat.
     const onlineFlags = await this.redis.mget(seatFields.map(([, userId]) => `online:${userId}`));
 
-    const seats: Record<string, { userId: string; username: string; teamId: number; isConnected: boolean }> = {};
+    const profiles = await this.seatProfiles(seatFields.map(([, userId]) => userId));
+
+    const seats: Record<string, SeatEntry> = {};
     const seatList: SeatEntry[] = [];
 
     seatFields.forEach(([field, userId], i) => {
@@ -291,12 +352,20 @@ export class RoomsService implements OnModuleInit {
       const username = hash[`${field}:u`] ?? '';
       const isConnected = !!onlineFlags[i];
       const teamId = seatIndex % 2 === 0 ? 1 : 2;
+      const profile = profiles[userId];
 
       // Disconnected lobby seats are cleaned up by the periodic sweepStaleLobbySeats
       // cron job, not here — scheduling eviction from this read path caused unbounded
       // work to compound as more clients polled the room list over time.
-      seats[String(seatIndex)] = { userId, username, teamId, isConnected };
-      seatList.push({ seatIndex, teamId, userId, username, isConnected });
+      const entry: SeatEntry = {
+        seatIndex, teamId, userId, username, isConnected,
+        avatarUrl: profile?.avatarUrl ?? null,
+        level: profile?.level ?? 1,
+        clubName: profile?.clubName ?? null,
+        clubIconUrl: profile?.clubIconUrl ?? null,
+      };
+      seats[String(seatIndex)] = entry;
+      seatList.push(entry);
     });
 
     seatList.sort((a, b) => a.seatIndex - b.seatIndex);
