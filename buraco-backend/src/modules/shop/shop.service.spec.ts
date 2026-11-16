@@ -147,3 +147,35 @@ describe('ShopService.redeemCode', () => {
     await expect(promoSetup({ expiresAt: new Date(0) }).service.redeemCode('u1', 'WELCOME')).rejects.toThrow('Promo code expired');
   });
 });
+
+
+describe('ShopService.equipDefault', () => {
+  function make() {
+    const calls: any[] = [];
+    const tx = {
+      inventory: { updateMany: jest.fn(async (a: any) => { calls.push(['inventory', a]); return { count: 1 }; }) },
+      customCard: { updateMany: jest.fn(async (a: any) => { calls.push(['customCard', a]); return { count: 1 }; }) },
+    };
+    const prisma = { $transaction: jest.fn(async (fn: any) => fn(tx)) };
+    return { service: new ShopService(prisma as any, {} as any), calls };
+  }
+
+  it('unequips the card backs and a custom card', async () => {
+    const { service, calls } = make();
+    const res = await service.equipDefault(USER, 'CARDS');
+    expect(res).toEqual({ category: ShopCategory.CARDS, equipped: null });
+    expect(calls.map((c) => c[0])).toEqual(['inventory', 'customCard']);
+    expect(calls[0][1].where).toEqual({ userId: USER, item: { category: ShopCategory.CARDS }, isEquipped: true });
+  });
+
+  it('unequips table colours only', async () => {
+    const { service, calls } = make();
+    await service.equipDefault(USER, 'TABLES');
+    expect(calls.map((c) => c[0])).toEqual(['inventory']);
+  });
+
+  it('refuses other categories', async () => {
+    const { service } = make();
+    await expect(service.equipDefault(USER, 'COINS')).rejects.toBeInstanceOf(BadRequestException);
+  });
+});

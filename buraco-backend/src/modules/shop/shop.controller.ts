@@ -69,6 +69,15 @@ export class ShopController {
     return this.shopService.equipItem(userId, itemId);
   }
 
+  @Put('equip-default/:category')
+  @ApiOperation({ summary: 'Back to the default card back / table colour / emoji set: unequip that category' })
+  @ApiParam({ name: 'category', enum: ['CARDS', 'TABLES', 'EMOJIS'] })
+  @ApiResponse({ status: 200, description: '{ category, equipped: null }' })
+  @ApiResponse({ status: 400, description: 'INVALID_CATEGORY' })
+  equipDefault(@CurrentUser('id') userId: string, @Param('category') category: string) {
+    return this.shopService.equipDefault(userId, category);
+  }
+
   @Get('equipped')
   @ApiOperation({ summary: 'Get all currently equipped cosmetics' })
   @ApiResponse({ status: 200, description: 'Map of category → equipped item' })

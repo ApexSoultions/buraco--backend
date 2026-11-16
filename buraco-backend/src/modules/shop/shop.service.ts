@@ -121,6 +121,27 @@ export class ShopService {
     });
   }
 
+  /**
+   * Back to the default look for one category (the free card back / table colour): nothing of
+   * that category stays equipped. For card backs a custom card in use is put away too.
+   */
+  async equipDefault(userId: string, category: string) {
+    const allowed: ShopCategory[] = [ShopCategory.CARDS, ShopCategory.TABLES, ShopCategory.EMOJIS];
+    const cat = allowed.find((c) => c === category);
+    if (!cat) throw new BadRequestException('INVALID_CATEGORY');
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.inventory.updateMany({
+        where: { userId, item: { category: cat }, isEquipped: true },
+        data: { isEquipped: false, equippedAt: null },
+      });
+      if (cat === ShopCategory.CARDS) {
+        await tx.customCard.updateMany({ where: { userId, isEquipped: true }, data: { isEquipped: false } });
+      }
+    });
+    return { category: cat, equipped: null };
+  }
+
   async getEquipped(userId: string) {
     return this.prisma.inventory.findMany({
       where: { userId, isEquipped: true },
