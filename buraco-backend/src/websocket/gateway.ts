@@ -18,6 +18,7 @@ import { RedisService } from '../common/redis/redis.service';
 import { ReconnectionService } from '../modules/reconnection/reconnection.service';
 import { RoomsService } from '../modules/rooms/rooms.service';
 import { TableChatService } from '../modules/tables/table-chat.service';
+import { GlobalChatService } from '../modules/tables/global-chat.service';
 import { RematchService } from '../modules/tables/rematch.service';
 import { SocketService, userRoom } from '../common/socket/socket.service';
 import { SlidingWindowLimiter } from '../common/rate-limit/sliding-window';
@@ -50,6 +51,7 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     private prisma: PrismaService,
     private tableChat: TableChatService,
     private rematch: RematchService,
+    private globalChat: GlobalChatService,
   ) {}
 
   afterInit(server: Server) {
@@ -696,6 +698,16 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
       await this.tableChat.send(data?.gameId, socket.data.userId, data ?? {});
     } catch (err) {
       socket.emit('error', { code: 'TABLE_CHAT_ERROR', message: (err as Error).message });
+    }
+  }
+
+  /** `lobby:chat:send` { kind?, text } → everyone on the table list gets `lobby:chat:message`. */
+  @SubscribeMessage('lobby:chat:send')
+  async handleGlobalChat(@ConnectedSocket() socket: Socket, @MessageBody() data: { kind?: string; text?: string }) {
+    try {
+      await this.globalChat.send(socket.data.userId, data ?? {});
+    } catch (err) {
+      socket.emit('error', { code: 'GLOBAL_CHAT_ERROR', message: (err as Error).message });
     }
   }
 

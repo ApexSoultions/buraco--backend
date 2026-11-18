@@ -8,6 +8,7 @@ import { S3Service } from '../../common/s3/s3.service';
 import { TableInvitesService } from './table-invites.service';
 import { TABLE_CHAT_MAX_VOICE_SECONDS, TableChatService } from './table-chat.service';
 import { RematchService } from './rematch.service';
+import { GLOBAL_CHAT_MAX_TEXT, GlobalChatService } from './global-chat.service';
 
 const ALLOWED_AUDIO_TYPES = ['audio/mpeg', 'audio/mp4', 'audio/webm', 'audio/ogg', 'audio/wav', 'audio/aac', 'audio/x-m4a'];
 
@@ -144,5 +145,38 @@ export class TableSocialController {
   @ApiOperation({ summary: 'Say no (or leave the score board); everyone gets game:rematch:cancelled' })
   declineRematch(@CurrentUser('id') userId: string, @Param('gameId') gameId: string) {
     return this.rematch.decline(gameId, userId);
+  }
+}
+
+@ApiTags('Global chat')
+@ApiBearerAuth()
+@UseGuards(JwtAuthGuard)
+@Controller('lobby-chat')
+export class GlobalChatController {
+  constructor(private readonly chat: GlobalChatService) {}
+
+  @Get()
+  @ApiOperation({ summary: 'Global Chat on the table list: { messages (last 50, minus cleared / blocked), blockedIds }' })
+  history(@CurrentUser('id') userId: string) {
+    return this.chat.history(userId);
+  }
+
+  @Post()
+  @ApiOperation({ summary: 'Send to Global Chat; everyone on the table list (room:subscribe) gets lobby:chat:message' })
+  @ApiBody({ schema: { type: 'object', required: ['text'], properties: { kind: { type: 'string', enum: ['TEXT', 'EMOJI'] }, text: { type: 'string', maxLength: GLOBAL_CHAT_MAX_TEXT } } } })
+  send(@CurrentUser('id') userId: string, @Body() body: { kind?: string; text?: string }) {
+    return this.chat.send(userId, body);
+  }
+
+  @Post('clear')
+  @ApiOperation({ summary: 'Clear Global Chat for me only' })
+  clear(@CurrentUser('id') userId: string) {
+    return this.chat.clear(userId);
+  }
+
+  @Post('report')
+  @ApiOperation({ summary: 'Report a player for their Global Chat messages' })
+  report(@CurrentUser('id') userId: string, @Body() body: { userId?: string; reason?: string }) {
+    return this.chat.report(userId, body);
   }
 }
