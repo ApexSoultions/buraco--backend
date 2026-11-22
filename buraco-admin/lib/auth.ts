@@ -7,7 +7,10 @@ export const getToken         = (): string | null => Cookies.get(KEY) ?? null;
 export const isAuthenticated  = (): boolean       => !!getToken();
 
 export function setToken(token: string) {
-  Cookies.set(KEY, token, { expires: EXPIRES, path: '/', sameSite: 'lax' });
+  // Strict: never sent when another site links here. Secure on HTTPS (Live), so the admin
+  // token never travels unencrypted; plain http is only for running it locally.
+  const secure = typeof window !== 'undefined' && window.location.protocol === 'https:';
+  Cookies.set(KEY, token, { expires: EXPIRES, path: '/', sameSite: 'strict', secure });
 }
 
 export function clearToken() {
