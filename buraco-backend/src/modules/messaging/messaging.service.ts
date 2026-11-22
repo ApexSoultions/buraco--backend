@@ -283,7 +283,7 @@ export class MessagingService {
 
     const details = dto.details?.trim() || null;
     const report = await this.prisma.report.create({
-      data: { ...target, reason: dto.reason, details },
+      data: { ...target, reason: dto.reason, details, source: 'MESSAGES' },
       select: { id: true, status: true, createdAt: true },
     });
     return { ...report, alreadyReported: false };

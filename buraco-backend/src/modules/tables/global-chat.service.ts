@@ -81,6 +81,36 @@ export class GlobalChatService {
     return { success: true };
   }
 
+  // ─── Moderation (admin panel) ──────────────────────────────────────────────
+  // Removed messages disappear from the history everyone loads. Players who have the chat
+  // open keep seeing them until they reopen it (the app has no "message removed" event yet).
+
+  /** The current Global Chat, newest last. */
+  async adminList() {
+    return (await this.redis.getJson<GlobalChatMessage[]>(KEY)) ?? [];
+  }
+
+  /** Removes one message, or every message of one player. Returns how many were removed. */
+  async adminRemove(filter: { messageId?: string; userId?: string }) {
+    if (!filter.messageId && !filter.userId) throw new BadRequestException('NOTHING_TO_REMOVE');
+    const list = (await this.redis.getJson<GlobalChatMessage[]>(KEY)) ?? [];
+    const keep = list.filter((m) => m.id !== filter.messageId && m.senderId !== filter.userId);
+    const removed = list.length - keep.length;
+    if (removed > 0) {
+      await this.redis.setJson(KEY, keep, 7 * 86400);
+      this.socket.emitToRoom(GLOBAL_CHAT_ROOM, 'lobby:chat:removed', { ids: list.filter((m) => !keep.includes(m)).map((m) => m.id) });
+    }
+    return { removed };
+  }
+
+  /** Empties Global Chat for everyone. */
+  async adminClearAll() {
+    const list = (await this.redis.getJson<GlobalChatMessage[]>(KEY)) ?? [];
+    await this.redis.del(KEY);
+    this.socket.emitToRoom(GLOBAL_CHAT_ROOM, 'lobby:chat:cleared', {});
+    return { removed: list.length };
+  }
+
   /** Report a player for what they wrote in Global Chat (saved with their recent messages). */
   async report(userId: string, body: { userId?: string; reason?: string }) {
     const reportedUserId = body?.userId;
@@ -93,7 +123,7 @@ export class GlobalChatService {
     const theirs = list.filter((m) => m.senderId === reportedUserId).slice(-10).map((m) => m.text);
     if (theirs.length === 0) throw new BadRequestException('NO_MESSAGES_FROM_USER');
     const details = `Global chat:\n${theirs.join('\n')}`.slice(0, 2000);
-    await this.prisma.report.create({ data: { reporterId: userId, reportedUserId, reason: reason as any, details } });
+    await this.prisma.report.create({ data: { reporterId: userId, reportedUserId, reason: reason as any, details, source: 'GLOBAL_CHAT' } });
     return { success: true };
   }
 }

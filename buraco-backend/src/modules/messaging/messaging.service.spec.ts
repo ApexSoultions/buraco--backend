@@ -222,7 +222,7 @@ describe('MessagingService — report', () => {
     const res = await service.reportConversation(CONV, ALICE, { reason: 'ABUSE' as any, details: '  rude  ' });
 
     expect(prisma.report.create).toHaveBeenCalledWith(expect.objectContaining({
-      data: { reporterId: ALICE, reportedUserId: BOB, conversationId: CONV, messageId: null, reason: 'ABUSE', details: 'rude' },
+      data: { reporterId: ALICE, reportedUserId: BOB, conversationId: CONV, messageId: null, reason: 'ABUSE', details: 'rude', source: 'MESSAGES' },
     }));
     expect(res.alreadyReported).toBe(false);
   });

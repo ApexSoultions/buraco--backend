@@ -579,6 +579,12 @@ model Report {
   reason         ReportReason
   details        String?
   status         ReportStatus  @default(OPEN)
+  /// Where it was reported from: MESSAGES (private chat), TABLE_CHAT, GLOBAL_CHAT. Null on old rows.
+  source         String?
+  /// Set by the admin panel when a moderator handles it.
+  reviewedAt     DateTime?
+  reviewedBy     String?
+  resolution     String?
   createdAt      DateTime      @default(now())
 
   @@index([status, createdAt])

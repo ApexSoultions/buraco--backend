@@ -144,7 +144,7 @@ export class TableChatService {
     const details = `Table chat, match ${gameId}:\n${theirs.join('\n') || '(no messages)'}`.slice(0, 2000);
 
     await this.prisma.report.create({
-      data: { reporterId: userId, reportedUserId, reason: reason as any, details },
+      data: { reporterId: userId, reportedUserId, reason: reason as any, details, source: 'TABLE_CHAT' },
     });
     return { success: true };
   }

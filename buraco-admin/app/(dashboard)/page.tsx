@@ -60,7 +60,8 @@ export default function DashboardPage() {
         <SectionTitle>Needs attention</SectionTitle>
         <div className="grid grid-cols-2 gap-3 sm:gap-4">
           <StatCard label="Open reports" value={todo.openReports} Icon={Flag}
-            color={todo.openReports ? 'bg-red-500' : 'bg-slate-300'} hint="Players reported by others" />
+            color={todo.openReports ? 'bg-red-500' : 'bg-slate-300'} hint="Players reported by others"
+            href={can(['SUPER_ADMIN', 'MODERATOR']) ? '/reports' : undefined} />
           <StatCard label="Custom cards" value={todo.pendingCustomCards} Icon={ImageIcon}
             color={todo.pendingCustomCards ? 'bg-amber-500' : 'bg-slate-300'} hint="Waiting for approval" />
         </div>
