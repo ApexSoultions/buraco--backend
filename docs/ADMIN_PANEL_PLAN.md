@@ -11,9 +11,12 @@ Started 2026-11-22. Milestone 6, task 1–2.
   table) and a separate key (`ADMIN_JWT_SECRET`); player accounts can't open it.
 - Roles already in the server: **SUPER_ADMIN** (everything), **MODERATOR** (players, reports,
   clans, chat), **SUPPORT** (read players, support tickets, notes).
-- Address: `https://admin.<domain>` (e.g. `admin.warag.app`) on the Live server, with HTTPS.
-  Until there is a domain it can only be used on the server itself / locally (no plain-HTTP
-  admin on the internet).
+- Address (chosen 2026-11-22): **`https://admin.13-232-172-199.sslip.io`** — sslip.io is a free
+  service that points any name containing an IP at that IP (no account). Caddy on the server
+  gets a free Let's Encrypt certificate for it (HTTPS) and sends it to the panel (pm2). Needs:
+  ports 80/443 open in the AWS security group and an **Elastic IP** (if the IP changes, the
+  address changes). When the client has a domain, only the Caddy line changes
+  (e.g. `admin.warag.app`). Never plain-HTTP on the internet.
 - Look: a clean dashboard (dark side menu, white content, tables, forms), the game logo, works
   on a laptop and a phone. No Figma frame exists for it.
 
@@ -21,7 +24,7 @@ Started 2026-11-22. Milestone 6, task 1–2.
 | # | Task | Status |
 |---|------|--------|
 | 1 | **Security check** of the whole admin app (its history had malicious code removed twice): read every file, dependencies, config; `npm audit`; fix anything found | ✅ 2026-11-22: no hidden code or leftovers; 10 vulnerable packages updated (Next 16.4.6, axios, js-cookie…), 0 left; login cookie strict + HTTPS-only; panel can't be framed |
-| 2 | **Login and roles**: admin login works against the current server; menu shows only what the role may use; change own password; a safe way to create the first admin (server command) | ⬜ |
+| 2 | **Login and roles**: admin login works against the current server; menu shows only what the role may use; change own password; a safe way to create the first admin (server command) | ✅ 2026-11-22: `GET /admin/me`, `PATCH /admin/auth/password`, `GET/POST/PATCH /admin/admins` (super admin; can't switch off / demote yourself; always one active super admin; audit-logged, passwords never logged); missions edits and audit log now super-admin only; panel: menu by role, "No access" page, My password, Admins page; `npx ts-node prisma/create-admin.ts` (hidden password). Tested locally: Support sees Dashboard/Users/Games/Leaderboard only, gets 403 on admins/missions/audit; a switched-off admin is logged out at once |
 | 3 | **Layout**: side menu grouped (Players · Moderation · Economy · Content · Clans · System), top bar (who is logged in, log out), WARAGA logo, phone-friendly | ⬜ |
 | 4 | **Dashboard**: players total / online now / new today, matches today, coins and purchases today, open reports, pending custom cards | ⬜ |
 | 5 | **Players**: search, profile (level, coins, lives, items, clan, matches), ban / unban, give / take coins and lives, send an item, notes, reset name | ⬜ |

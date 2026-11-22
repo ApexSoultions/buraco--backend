@@ -344,7 +344,8 @@ export class AdminController {
   }
 
   @Post('missions')
-  @UseGuards(AdminJwtGuard)
+  @UseGuards(AdminJwtGuard, AdminRolesGuard)
+  @AdminRoles(AdminRole.SUPER_ADMIN)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Create a mission' })
   createMission(@CurrentUser('id') adminId: string, @Body() dto: CreateMissionDto) {
@@ -352,7 +353,8 @@ export class AdminController {
   }
 
   @Patch('missions/:missionId')
-  @UseGuards(AdminJwtGuard)
+  @UseGuards(AdminJwtGuard, AdminRolesGuard)
+  @AdminRoles(AdminRole.SUPER_ADMIN)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Update a mission' })
   updateMission(
@@ -364,7 +366,8 @@ export class AdminController {
   }
 
   @Patch('missions/:missionId/toggle')
-  @UseGuards(AdminJwtGuard)
+  @UseGuards(AdminJwtGuard, AdminRolesGuard)
+  @AdminRoles(AdminRole.SUPER_ADMIN)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Toggle mission active state' })
   toggleMission(
@@ -376,7 +379,8 @@ export class AdminController {
   }
 
   @Delete('missions/:missionId')
-  @UseGuards(AdminJwtGuard)
+  @UseGuards(AdminJwtGuard, AdminRolesGuard)
+  @AdminRoles(AdminRole.SUPER_ADMIN)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Delete a mission' })
   deleteMission(@CurrentUser('id') adminId: string, @Param('missionId') missionId: string) {
@@ -386,7 +390,8 @@ export class AdminController {
   // ─── Audit Logs ───────────────────────────────────────────────────────────
 
   @Get('audit-logs')
-  @UseGuards(AdminJwtGuard)
+  @UseGuards(AdminJwtGuard, AdminRolesGuard)
+  @AdminRoles(AdminRole.SUPER_ADMIN)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get admin audit logs' })
   getAuditLogs(@Query('page') page = 1, @Query('limit') limit = 50) {
