@@ -162,4 +162,16 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   keys(pattern: string): Promise<string[]> {
     return this.client.keys(pattern);
   }
+
+  /** How many keys match, counted with SCAN in small steps (never blocks Redis like KEYS). */
+  async countKeys(pattern: string): Promise<number> {
+    let cursor = '0';
+    let count = 0;
+    do {
+      const [next, batch] = await this.client.scan(cursor, 'MATCH', pattern, 'COUNT', 500);
+      cursor = next;
+      count += batch.length;
+    } while (cursor !== '0');
+    return count;
+  }
 }

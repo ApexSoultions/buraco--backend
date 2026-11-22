@@ -10,6 +10,7 @@ import { AdminRolesGuard } from '../../common/guards/admin-roles.guard';
 import { AdminRoles } from '../../common/decorators/admin-roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AdminService } from './admin.service';
+import { AdminDashboardService } from './admin-dashboard.service';
 import { AdminLoginDto } from './dto/admin-login.dto';
 import { BanUserDto } from './dto/ban-user.dto';
 import { CreditUserDto } from './dto/credit-user.dto';
@@ -28,7 +29,10 @@ import { CreateMissionDto } from './dto/create-mission.dto';
 // Admin routes keep the per-IP default limit; login keeps the strict one.
 @SkipThrottle({ anon: true })
 export class AdminController {
-  constructor(private readonly adminService: AdminService) {}
+  constructor(
+    private readonly adminService: AdminService,
+    private readonly dashboard: AdminDashboardService,
+  ) {}
 
   // ─── Public ───────────────────────────────────────────────────────────────
 
@@ -46,9 +50,9 @@ export class AdminController {
   @Get('dashboard')
   @UseGuards(AdminJwtGuard)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Dashboard statistics' })
+  @ApiOperation({ summary: 'Dashboard: players (online, new, banned), matches, shop and purchases (last 24 h), open reports, pending custom cards, last 7 days, top players' })
   getDashboard() {
-    return this.adminService.getDashboard();
+    return this.dashboard.get();
   }
 
   // ─── Users ────────────────────────────────────────────────────────────────

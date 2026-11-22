@@ -52,49 +52,6 @@ export class AdminService {
     return { admin: safe, accessToken: token, expiresIn: 28800 };
   }
 
-  // ─── Dashboard Stats ──────────────────────────────────────────────────────
-
-  async getDashboard() {
-    const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
-
-    const [totalUsers, activeUsers, bannedUsers, totalGames, activeGames, totalRevenue, newUsersToday, gamesToday, topPlayerStats] = await Promise.all([
-      this.prisma.user.count({ where: { isDeleted: false } }),
-      this.prisma.user.count({ where: { isDeleted: false, lastSeenAt: { gte: since24h } } }),
-      this.prisma.user.count({ where: { isBanned: true } }),
-      this.prisma.gameSession.count(),
-      this.prisma.gameSession.count({ where: { status: 'IN_PROGRESS' } }),
-      this.prisma.transaction.aggregate({ _sum: { amount: true }, where: { type: TransactionType.PURCHASE } }),
-      this.prisma.user.count({ where: { isDeleted: false, createdAt: { gte: since24h } } }),
-      this.prisma.gameSession.count({ where: { createdAt: { gte: since24h } } }),
-      this.prisma.playerStats.findMany({
-        take: 5,
-        orderBy: { points: 'desc' },
-        include: { user: { select: { id: true, username: true, avatarUrl: true } } },
-      }),
-    ]);
-
-    const topPlayers = topPlayerStats.map((s) => ({
-      id: s.user.id,
-      username: s.user.username,
-      avatarUrl: s.user.avatarUrl,
-      points: s.points,
-      level: s.level,
-      winPercentage: s.winPercentage,
-    }));
-
-    return {
-      totalUsers,
-      activeUsers,
-      bannedUsers,
-      totalGames,
-      activeGames,
-      totalRevenue: totalRevenue._sum.amount ?? 0,
-      newUsersToday,
-      gamesToday,
-      topPlayers,
-    };
-  }
-
   // ─── User Management ─────────────────────────────────────────────────────
 
   async listUsers(page: number, limit: number, search?: string) {
