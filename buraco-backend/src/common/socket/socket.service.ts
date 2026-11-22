@@ -29,6 +29,16 @@ export class SocketService {
     this.server?.emit(event, data);
   }
 
+  /**
+   * Disconnects every socket of this player (e.g. just banned). Uses `session:kicked`, which
+   * the game already handles (it is also sent when the account logs in on another phone).
+   */
+  kickUser(userId: string, reason: string) {
+    if (!this.server) return;
+    this.server.to(userRoom(userId)).emit('session:kicked', { reason });
+    this.server.in(userRoom(userId)).disconnectSockets(true);
+  }
+
   async emitPerPlayer(room: string, event: string, dataFn: (userId: string) => Promise<unknown>) {
     if (!this.server) return;
     const sockets = await this.server.in(room).fetchSockets();

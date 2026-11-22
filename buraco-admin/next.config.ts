@@ -29,6 +29,12 @@ const nextConfig: NextConfig = {
         source: '/api/v1/:path*',
         destination: `${apiUrl}/v1/:path*`,
       },
+      // The game's built-in avatars, through the panel's own address: the game server only
+      // lets its own site show its files (Cross-Origin-Resource-Policy: same-origin).
+      {
+        source: '/avatars/:path*',
+        destination: `${apiUrl}/avatars/:path*`,
+      },
     ];
   },
 };

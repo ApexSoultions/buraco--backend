@@ -11,6 +11,8 @@ import { AdminRoles } from '../../common/decorators/admin-roles.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AdminService } from './admin.service';
 import { AdminDashboardService } from './admin-dashboard.service';
+import { AdminPlayersService } from './admin-players.service';
+import { AdjustLivesDto } from './dto/admin-players.dto';
 import { AdminLoginDto } from './dto/admin-login.dto';
 import { BanUserDto } from './dto/ban-user.dto';
 import { CreditUserDto } from './dto/credit-user.dto';
@@ -32,6 +34,7 @@ export class AdminController {
   constructor(
     private readonly adminService: AdminService,
     private readonly dashboard: AdminDashboardService,
+    private readonly players: AdminPlayersService,
   ) {}
 
   // ─── Public ───────────────────────────────────────────────────────────────
@@ -77,7 +80,7 @@ export class AdminController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get user detail with stats, transactions, notes' })
   getUser(@Param('userId') userId: string) {
-    return this.adminService.getUser(userId);
+    return this.players.getPlayer(userId);
   }
 
   @Patch('users/:userId/ban')
@@ -86,7 +89,7 @@ export class AdminController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Ban or unban a user' })
   banUser(@CurrentUser('id') adminId: string, @Param('userId') userId: string, @Body() dto: BanUserDto) {
-    return this.adminService.banUser(adminId, userId, dto);
+    return this.players.setBan(adminId, userId, dto);
   }
 
   @Post('users/:userId/notes')
@@ -94,7 +97,7 @@ export class AdminController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Add admin note to user' })
   addNote(@CurrentUser('id') adminId: string, @Param('userId') userId: string, @Body('content') content: string) {
-    return this.adminService.addNote(adminId, userId, content);
+    return this.players.addNote(adminId, userId, content);
   }
 
   @Post('users/:userId/credit')
@@ -103,7 +106,7 @@ export class AdminController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Credit coins or diamonds to user' })
   creditUser(@CurrentUser('id') adminId: string, @Param('userId') userId: string, @Body() dto: CreditUserDto) {
-    return this.adminService.creditUser(adminId, userId, dto);
+    return this.players.changeBalance(adminId, userId, dto, 1);
   }
 
   @Post('users/:userId/deduct')
@@ -112,7 +115,25 @@ export class AdminController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Deduct coins or diamonds from user' })
   deductUser(@CurrentUser('id') adminId: string, @Param('userId') userId: string, @Body() dto: CreditUserDto) {
-    return this.adminService.deductUser(adminId, userId, dto);
+    return this.players.changeBalance(adminId, userId, dto, -1);
+  }
+
+  @Post('users/:userId/lives')
+  @UseGuards(AdminJwtGuard, AdminRolesGuard)
+  @AdminRoles(AdminRole.SUPER_ADMIN)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Give (positive) or take (negative) lives' })
+  changeLives(@CurrentUser('id') adminId: string, @Param('userId') userId: string, @Body() dto: AdjustLivesDto) {
+    return this.players.changeLives(adminId, userId, dto);
+  }
+
+  @Post('users/:userId/reset-name')
+  @UseGuards(AdminJwtGuard, AdminRolesGuard)
+  @AdminRoles(AdminRole.SUPER_ADMIN, AdminRole.MODERATOR)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Replace an offensive name with "Player" + 6 digits' })
+  resetName(@CurrentUser('id') adminId: string, @Param('userId') userId: string) {
+    return this.players.resetName(adminId, userId);
   }
 
   @Patch('users/:userId')

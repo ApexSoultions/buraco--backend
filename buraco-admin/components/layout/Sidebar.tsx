@@ -30,7 +30,7 @@ export default function Sidebar({ open, onClose }: { open: boolean; onClose(): v
         {/* Brand */}
         <div className="flex items-center justify-between px-4 pt-4 pb-3">
           <Link href="/" onClick={onClose} className="flex items-center gap-3">
-            <Image src="/waraga-logo.png" alt="WARAGA" width={84} height={48} priority className="h-12 w-auto" />
+            <Image src="/waraga-logo.png" alt="WARAGA" width={84} height={48} priority style={{ height: 48, width: "auto" }} />
             <div className="leading-tight">
               <p className="text-sm font-semibold text-white">WARAGA</p>
               <p className="text-[11px] text-slate-400">Admin panel</p>

@@ -7,11 +7,12 @@ import { AdminController } from './admin.controller';
 import { AdminAccountsController } from './admin-accounts.controller';
 import { AdminAccountsService } from './admin-accounts.service';
 import { AdminDashboardService } from './admin-dashboard.service';
+import { AdminPlayersService } from './admin-players.service';
 
 @Module({
   imports: [PrismaModule, JwtModule.register({}), SystemConfigModule],
   controllers: [AdminController, AdminAccountsController],
-  providers: [AdminService, AdminAccountsService, AdminDashboardService],
+  providers: [AdminService, AdminAccountsService, AdminDashboardService, AdminPlayersService],
   exports: [AdminService],
 })
 export class AdminModule {}

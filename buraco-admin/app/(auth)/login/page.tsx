@@ -35,7 +35,7 @@ export default function LoginPage() {
 
         {/* Logo */}
         <div className="text-center mb-6">
-          <Image src="/waraga-logo.png" alt="WARAGA" width={209} height={118} priority className="mx-auto h-28 w-auto mb-3" />
+          <Image src="/waraga-logo.png" alt="WARAGA" width={209} height={118} priority className="mx-auto mb-3" style={{ height: 112, width: "auto" }} />
           <h1 className="text-xl font-bold text-white">Admin panel</h1>
           <p className="text-sm text-slate-400 mt-1">Sign in to your admin account</p>
         </div>

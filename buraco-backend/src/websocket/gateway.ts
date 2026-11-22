@@ -68,6 +68,14 @@ export class AppGateway implements OnGatewayInit, OnGatewayConnection, OnGateway
     try {
       const payload = this.jwt.verify(token, { secret: this.config.get('jwt.secret') });
 
+      // A banned (or deleted) account can't reconnect, even with a token that hasn't expired.
+      const account = await this.prisma.user.findUnique({ where: { id: payload.sub }, select: { isBanned: true, isDeleted: true } });
+      if (!account || account.isBanned || account.isDeleted) {
+        socket.emit('session:kicked', { reason: account?.isBanned ? 'Account banned' : 'Account not found' });
+        socket.disconnect();
+        return;
+      }
+
       const sessionStart = await this.redis.get(`user:session:${payload.sub}`);
       if (sessionStart && payload.iat < parseInt(sessionStart, 10)) {
         socket.emit('error', { code: 'SESSION_SUPERSEDED', message: 'Logged in on another device' });

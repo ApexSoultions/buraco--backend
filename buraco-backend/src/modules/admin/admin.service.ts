@@ -65,74 +65,12 @@ export class AdminService {
         skip: (page - 1) * limit,
         take: limit,
         orderBy: { createdAt: 'desc' },
-        select: { id: true, username: true, email: true, coins: true, diamonds: true, subscriptionStatus: true, isBanned: true, createdAt: true, lastSeenAt: true },
+        select: { id: true, username: true, email: true, avatarUrl: true, coins: true, diamonds: true, lives: true, subscriptionStatus: true, isBanned: true, createdAt: true, lastSeenAt: true },
       }),
       this.prisma.user.count({ where }),
     ]);
 
     return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
-  }
-
-  async getUser(userId: string) {
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      include: { stats: true, transactions: { take: 10, orderBy: { createdAt: 'desc' } }, adminNotes: { orderBy: { createdAt: 'desc' } } },
-    });
-    if (!user) throw new NotFoundException('User not found');
-    const { passwordHash, googleId, appleId, ...safe } = user;
-    return safe;
-  }
-
-  async banUser(adminId: string, userId: string, dto: BanUserDto) {
-    const user = await this.prisma.user.findUnique({ where: { id: userId } });
-    if (!user) throw new NotFoundException('User not found');
-
-    await this.prisma.user.update({ where: { id: userId }, data: { isBanned: dto.isBanned, banReason: dto.reason ?? null } });
-    await this.audit(adminId, dto.isBanned ? 'BAN_USER' : 'UNBAN_USER', 'User', userId, { reason: dto.reason });
-    return { message: dto.isBanned ? 'User banned' : 'User unbanned' };
-  }
-
-  async addNote(adminId: string, userId: string, content: string) {
-    return this.prisma.adminNote.create({ data: { userId, adminId, content } });
-  }
-
-  async creditUser(adminId: string, userId: string, dto: CreditUserDto) {
-    const user = await this.prisma.user.findUnique({ where: { id: userId } });
-    if (!user) throw new NotFoundException('User not found');
-
-    const isCoins = dto.currency === CurrencyType.COINS;
-    const balanceBefore = isCoins ? user.coins : user.diamonds;
-    const balanceAfter = balanceBefore + dto.amount;
-
-    await this.prisma.$transaction([
-      this.prisma.user.update({ where: { id: userId }, data: isCoins ? { coins: balanceAfter } : { diamonds: balanceAfter } }),
-      this.prisma.transaction.create({
-        data: { userId, type: TransactionType.MANUAL_CREDIT, currency: dto.currency, amount: dto.amount, balanceBefore, balanceAfter, description: dto.reason, performedBy: adminId },
-      }),
-    ]);
-
-    await this.audit(adminId, 'CREDIT_USER', 'User', userId, { currency: dto.currency, amount: dto.amount });
-    return { message: `Credited ${dto.amount} ${dto.currency}` };
-  }
-
-  async deductUser(adminId: string, userId: string, dto: CreditUserDto) {
-    const user = await this.prisma.user.findUnique({ where: { id: userId } });
-    if (!user) throw new NotFoundException('User not found');
-
-    const isCoins = dto.currency === CurrencyType.COINS;
-    const balanceBefore = isCoins ? user.coins : user.diamonds;
-    if (balanceBefore < dto.amount) throw new BadRequestException('Insufficient balance');
-    const balanceAfter = balanceBefore - dto.amount;
-
-    await this.prisma.$transaction([
-      this.prisma.user.update({ where: { id: userId }, data: isCoins ? { coins: balanceAfter } : { diamonds: balanceAfter } }),
-      this.prisma.transaction.create({
-        data: { userId, type: TransactionType.MANUAL_DEDUCT, currency: dto.currency, amount: dto.amount, balanceBefore, balanceAfter, description: dto.reason, performedBy: adminId },
-      }),
-    ]);
-
-    await this.audit(adminId, 'DEDUCT_USER', 'User', userId, { currency: dto.currency, amount: dto.amount });
-    return { message: `Deducted ${dto.amount} ${dto.currency}` };
   }
 
   // ─── Game Management ──────────────────────────────────────────────────────
