@@ -109,7 +109,7 @@ export default function ClubsPage() {
   return (
     <div>
       <div className="mb-6">
-        <h1 className="text-xl font-semibold text-slate-900">Clubs</h1>
+        <h1 className="text-xl font-semibold text-slate-900">Clans</h1>
         <p className="text-sm text-slate-500 mt-0.5">Browse, inspect, and moderate clubs</p>
       </div>
 

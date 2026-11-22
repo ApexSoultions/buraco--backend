@@ -1,102 +1,76 @@
 'use client';
+import Image from 'next/image';
 import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
-import {
-  LayoutDashboard, Users, Gamepad2, ShoppingBag,
-  Tag, Megaphone, Settings2, ScrollText, LogOut,
-  Trophy, Shield, BarChart2, UserCog, KeyRound,
-} from 'lucide-react';
-import { clearToken } from '@/lib/auth';
-import { AdminRole, ROLE_LABEL, useAdmin } from '@/lib/admin';
+import { usePathname } from 'next/navigation';
+import { X } from 'lucide-react';
+import { useAdmin } from '@/lib/admin';
+import { NAV, isActive } from './nav';
 
-const ALL: AdminRole[] = ['SUPER_ADMIN', 'MODERATOR', 'SUPPORT'];
-const STAFF: AdminRole[] = ['SUPER_ADMIN', 'MODERATOR'];
-const SUPER: AdminRole[] = ['SUPER_ADMIN'];
-
-// Who sees each page (the server checks every action again).
-const NAV = [
-  { href: '/',             label: 'Dashboard',   Icon: LayoutDashboard, roles: ALL },
-  { href: '/users',        label: 'Users',       Icon: Users,           roles: ALL },
-  { href: '/games',        label: 'Games',       Icon: Gamepad2,        roles: ALL },
-  { href: '/leaderboard',  label: 'Leaderboard', Icon: BarChart2,       roles: ALL },
-  { href: '/clubs',        label: 'Clubs',       Icon: Shield,          roles: STAFF },
-  { href: '/broadcast',    label: 'Broadcast',   Icon: Megaphone,       roles: STAFF },
-  { href: '/shop',         label: 'Shop',        Icon: ShoppingBag,     roles: SUPER },
-  { href: '/promos',       label: 'Promos',      Icon: Tag,             roles: SUPER },
-  { href: '/missions',     label: 'Missions',    Icon: Trophy,          roles: SUPER },
-  { href: '/config',       label: 'Config',      Icon: Settings2,       roles: SUPER },
-  { href: '/admins',       label: 'Admins',      Icon: UserCog,         roles: SUPER },
-  { href: '/audit',        label: 'Audit Logs',  Icon: ScrollText,      roles: SUPER },
-];
-
-function active(pathname: string, href: string) {
-  return href === '/' ? pathname === '/' : pathname.startsWith(href);
-}
-
-export default function Sidebar() {
+/**
+ * The dark side menu, grouped (Players, Community, Economy, …), showing only the pages the
+ * logged-in admin's role may open. Always visible on wide screens; on phones it slides in
+ * over the page from the top bar's menu button and closes when a page is picked.
+ */
+export default function Sidebar({ open, onClose }: { open: boolean; onClose(): void }) {
   const pathname = usePathname();
-  const router   = useRouter();
-  const { admin, can } = useAdmin();
+  const { can } = useAdmin();
 
   return (
-    <aside className="w-56 shrink-0 min-h-screen bg-white border-r border-slate-200 flex flex-col">
-      {/* Brand */}
-      <div className="px-4 py-5 border-b border-slate-100">
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white text-base font-bold shrink-0">
-            B
-          </div>
-          <div className="leading-tight">
-            <p className="text-sm font-semibold text-slate-900">Barasilian Cards Game Admin</p>
-            <p className="text-[11px] text-slate-400">Management Portal</p>
-          </div>
+    <>
+      {/* Phone: dark layer behind the open menu; tap to close. */}
+      <div
+        onClick={onClose}
+        className={`fixed inset-0 z-30 bg-slate-950/50 lg:hidden transition-opacity ${open ? 'opacity-100' : 'pointer-events-none opacity-0'}`}
+      />
+      <aside
+        className={`fixed inset-y-0 left-0 z-40 w-64 bg-slate-900 text-slate-300 flex flex-col
+          transition-transform duration-200 lg:static lg:translate-x-0 lg:shrink-0
+          ${open ? 'translate-x-0' : '-translate-x-full'}`}
+      >
+        {/* Brand */}
+        <div className="flex items-center justify-between px-4 pt-4 pb-3">
+          <Link href="/" onClick={onClose} className="flex items-center gap-3">
+            <Image src="/waraga-logo.png" alt="WARAGA" width={84} height={48} priority className="h-12 w-auto" />
+            <div className="leading-tight">
+              <p className="text-sm font-semibold text-white">WARAGA</p>
+              <p className="text-[11px] text-slate-400">Admin panel</p>
+            </div>
+          </Link>
+          <button onClick={onClose} className="lg:hidden rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white" aria-label="Close menu">
+            <X size={18} />
+          </button>
         </div>
-      </div>
 
-      {/* Nav */}
-      <nav className="flex-1 px-2 py-3 space-y-0.5">
-        {NAV.filter((n) => can(n.roles)).map(({ href, label, Icon }) => {
-          const isActive = active(pathname, href);
-          return (
-            <Link
-              key={href}
-              href={href}
-              className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors
-                ${isActive
-                  ? 'bg-blue-50 text-blue-700 font-medium'
-                  : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'}`}
-            >
-              <Icon size={15} strokeWidth={isActive ? 2.2 : 1.8} />
-              {label}
-            </Link>
-          );
-        })}
-      </nav>
+        {/* Groups */}
+        <nav className="flex-1 overflow-y-auto px-3 pb-4">
+          {NAV.map((group) => {
+            const items = group.items.filter((i) => can(i.roles));
+            if (items.length === 0) return null;
+            return (
+              <div key={group.title} className="mt-4">
+                <p className="px-3 mb-1 text-[11px] font-semibold uppercase tracking-wider text-slate-500">{group.title}</p>
+                {items.map(({ href, label, Icon }) => {
+                  const active = isActive(pathname, href);
+                  return (
+                    <Link
+                      key={href}
+                      href={href}
+                      onClick={onClose}
+                      className={`flex items-center gap-3 px-3 py-2.5 lg:py-2 rounded-lg text-sm transition-colors
+                        ${active ? 'bg-blue-600 text-white font-medium' : 'hover:bg-slate-800 hover:text-white'}`}
+                    >
+                      <Icon size={16} strokeWidth={active ? 2.2 : 1.8} />
+                      {label}
+                    </Link>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </nav>
 
-      {/* Who is logged in, own password, log out */}
-      <div className="px-2 pb-4 border-t border-slate-100 pt-2">
-        {admin && (
-          <div className="px-3 py-2">
-            <p className="text-sm font-medium text-slate-900 truncate">{admin.name}</p>
-            <p className="text-[11px] text-slate-400 truncate">{admin.email} · {ROLE_LABEL[admin.role]}</p>
-          </div>
-        )}
-        <Link
-          href="/account"
-          className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors
-            ${active(pathname, '/account') ? 'bg-blue-50 text-blue-700 font-medium' : 'text-slate-400 hover:text-slate-700 hover:bg-slate-50'}`}
-        >
-          <KeyRound size={15} strokeWidth={1.8} />
-          My password
-        </Link>
-        <button
-          onClick={() => { clearToken(); router.push('/login'); }}
-          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-slate-400 hover:text-slate-700 hover:bg-slate-50 transition-colors"
-        >
-          <LogOut size={15} strokeWidth={1.8} />
-          Log out
-        </button>
-      </div>
-    </aside>
+        <p className="px-6 py-3 text-[11px] text-slate-600 border-t border-slate-800">WARAGA · Barasilian Hand</p>
+      </aside>
+    </>
   );
 }

@@ -54,7 +54,7 @@ export default function GamesPage() {
   return (
     <div>
       <div className="mb-6">
-        <h1 className="text-xl font-semibold text-slate-900">Games</h1>
+        <h1 className="text-xl font-semibold text-slate-900">Matches</h1>
         <p className="text-sm text-slate-500 mt-0.5">Monitor game sessions</p>
       </div>
 

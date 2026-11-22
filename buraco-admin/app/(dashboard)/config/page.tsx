@@ -117,7 +117,7 @@ export default function ConfigPage() {
   return (
     <div>
       <div className="mb-6">
-        <h1 className="text-xl font-semibold text-slate-900">System Config</h1>
+        <h1 className="text-xl font-semibold text-slate-900">Game settings</h1>
         <p className="text-sm text-slate-500 mt-0.5">Live runtime settings — changes take effect within 60 seconds</p>
       </div>
 

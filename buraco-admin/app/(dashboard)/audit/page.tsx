@@ -26,7 +26,7 @@ export default function AuditPage() {
   return (
     <div>
       <div className="mb-6">
-        <h1 className="text-xl font-semibold text-slate-900">Audit Logs</h1>
+        <h1 className="text-xl font-semibold text-slate-900">Audit log</h1>
         <p className="text-sm text-slate-500 mt-0.5">Full history of admin actions</p>
       </div>
 

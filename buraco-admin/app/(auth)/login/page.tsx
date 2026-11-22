@@ -1,5 +1,6 @@
 'use client';
 import { useState } from 'react';
+import Image from 'next/image';
 import toast from 'react-hot-toast';
 import { Eye, EyeOff } from 'lucide-react';
 import api from '@/lib/api';
@@ -29,16 +30,14 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-50 px-4">
+    <div className="min-h-screen flex items-center justify-center bg-slate-900 px-4">
       <div className="w-full max-w-90">
 
         {/* Logo */}
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-12 h-12 bg-blue-600 rounded-2xl text-white text-xl font-bold mb-4">
-            B
-          </div>
-          <h1 className="text-xl font-bold text-slate-900">Barasilian Cards Game Admin</h1>
-          <p className="text-sm text-slate-500 mt-1">Sign in to your admin account</p>
+        <div className="text-center mb-6">
+          <Image src="/waraga-logo.png" alt="WARAGA" width={209} height={118} priority className="mx-auto h-28 w-auto mb-3" />
+          <h1 className="text-xl font-bold text-white">Admin panel</h1>
+          <p className="text-sm text-slate-400 mt-1">Sign in to your admin account</p>
         </div>
 
         {/* Card */}
@@ -52,7 +51,7 @@ export default function LoginPage() {
                 autoFocus
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="admin@barasilian.game"
+                placeholder="you@example.com"
                 className="block w-full rounded-lg border border-slate-200 px-3 py-2 text-sm
                   placeholder:text-slate-400 outline-none transition
                   focus:border-blue-500 focus:ring-1 focus:ring-blue-500 bg-white"
@@ -86,7 +85,7 @@ export default function LoginPage() {
           </form>
         </div>
 
-        <p className="text-center text-xs text-slate-400 mt-6">Barasilian Cards Game — Admin v1</p>
+        <p className="text-center text-xs text-slate-500 mt-6">WARAGA · Barasilian Hand — staff only</p>
       </div>
     </div>
   );
