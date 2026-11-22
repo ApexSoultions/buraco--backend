@@ -63,7 +63,8 @@ export default function DashboardPage() {
             color={todo.openReports ? 'bg-red-500' : 'bg-slate-300'} hint="Players reported by others"
             href={can(['SUPER_ADMIN', 'MODERATOR']) ? '/reports' : undefined} />
           <StatCard label="Custom cards" value={todo.pendingCustomCards} Icon={ImageIcon}
-            color={todo.pendingCustomCards ? 'bg-amber-500' : 'bg-slate-300'} hint="Waiting for approval" />
+            color={todo.pendingCustomCards ? 'bg-amber-500' : 'bg-slate-300'} hint="Waiting for approval"
+            href={can(['SUPER_ADMIN', 'MODERATOR']) ? '/custom-cards' : undefined} />
         </div>
         {attention === 0 && <p className="text-xs text-slate-400 mt-2">Nothing waiting. 👍</p>}
       </section>

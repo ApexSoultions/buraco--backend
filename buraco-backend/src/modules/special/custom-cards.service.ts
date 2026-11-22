@@ -1,5 +1,6 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { CurrencyType, CustomCardStatus, TransactionType } from '@prisma/client';
+import { BadRequestException, ConflictException, Injectable, NotFoundException, Optional } from '@nestjs/common';
+import { CurrencyType, CustomCardStatus, NotificationType, TransactionType } from '@prisma/client';
+import { NotificationsService } from '../notifications/notifications.service';
 import { v4 as uuidv4 } from 'uuid';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { S3Service } from '../../common/s3/s3.service';
@@ -17,6 +18,7 @@ export class CustomCardsService {
   constructor(
     private prisma: PrismaService,
     private s3: S3Service,
+    @Optional() private notifications?: NotificationsService,
   ) {}
 
   /** The player's custom cards, newest first, each with a 1-hour picture link. */
@@ -77,27 +79,50 @@ export class CustomCardsService {
 
   // ── Admin review ────────────────────────────────────────────────────────
 
+  /**
+   * Cards to review: waiting ones oldest first (fair queue), decided ones newest first.
+   * Each with a 1-hour picture link and the reviewing admin's name.
+   */
   async listForReview(status: CustomCardStatus = CustomCardStatus.PENDING) {
     const cards = await this.prisma.customCard.findMany({
       where: { status },
-      orderBy: { createdAt: 'asc' },
+      orderBy: { createdAt: status === CustomCardStatus.PENDING ? 'asc' : 'desc' },
       include: { user: { select: { id: true, username: true } } },
       take: 100,
     });
-    return this.withLinks(cards);
+    const reviewerIds = [...new Set(cards.map((c) => c.reviewedBy).filter((v): v is string => !!v))];
+    const reviewers = reviewerIds.length
+      ? await this.prisma.adminUser.findMany({ where: { id: { in: reviewerIds } }, select: { id: true, name: true } })
+      : [];
+    const name = new Map(reviewers.map((r) => [r.id, r.name]));
+    const withLinks = await this.withLinks(cards);
+    return withLinks.map((c) => ({ ...c, reviewer: c.reviewedBy ? (name.get(c.reviewedBy) ?? 'Admin') : null }));
   }
 
   async approve(id: string, adminId: string) {
+    const card = await this.prisma.customCard.findFirst({ where: { id, status: CustomCardStatus.PENDING }, select: { userId: true } });
     const updated = await this.prisma.customCard.updateMany({
       where: { id, status: CustomCardStatus.PENDING },
       data: { status: CustomCardStatus.APPROVED, reviewedBy: adminId, reviewedAt: new Date() },
     });
-    if (updated.count === 0) throw new NotFoundException('No card waiting for review with that id');
+    if (!card || updated.count === 0) throw new NotFoundException('No card waiting for review with that id');
+    await this.prisma.adminAuditLog.create({ data: { adminId, action: 'APPROVE_CUSTOM_CARD', targetType: 'CustomCard', targetId: id, details: { userId: card.userId } } });
+    await this.notifications?.notifySafely(card.userId, NotificationType.SYSTEM, 'Custom card approved',
+      'Your custom card back was approved. You can use it now in Shop → Special Features.', { customCardId: id, status: 'APPROVED' });
     return { id, status: CustomCardStatus.APPROVED };
   }
 
-  /** Reject and give the coins back. */
+  /** Reject and give the coins back; the player is told why. */
   async reject(id: string, adminId: string, reason?: string) {
+    const result = await this.rejectAndRefund(id, adminId, reason);
+    await this.prisma.adminAuditLog.create({ data: { adminId, action: 'REJECT_CUSTOM_CARD', targetType: 'CustomCard', targetId: id, details: { userId: result.userId, reason: reason ?? null, refunded: result.refunded } } });
+    const refund = result.refunded > 0 ? ` Your ${result.refunded.toLocaleString('en-US')} coins were refunded.` : '';
+    await this.notifications?.notifySafely(result.userId, NotificationType.SYSTEM, 'Custom card not approved',
+      `Your custom card back was not approved${reason ? `: ${reason.trim().replace(/[.!?]$/, '')}.` : '.'}${refund}`, { customCardId: id, status: 'REJECTED' });
+    return { id: result.id, status: result.status, refunded: result.refunded };
+  }
+
+  private rejectAndRefund(id: string, adminId: string, reason?: string) {
     return this.prisma.$transaction(async (tx) => {
       const card = await tx.customCard.findFirst({ where: { id, status: CustomCardStatus.PENDING } });
       if (!card) throw new NotFoundException('No card waiting for review with that id');
@@ -115,7 +140,7 @@ export class CustomCardsService {
           },
         });
       }
-      return { id, status: CustomCardStatus.REJECTED, refunded: card.pricePaid };
+      return { id, status: CustomCardStatus.REJECTED, refunded: card.pricePaid, userId: card.userId };
     });
   }
 

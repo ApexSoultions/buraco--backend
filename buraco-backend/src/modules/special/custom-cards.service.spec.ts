@@ -47,13 +47,18 @@ function setup(opts: { coins?: number; pending?: number } = {}) {
       findMany: jest.fn(async () => [...cards]),
     },
     $transaction: jest.fn(async (arg: any) => (typeof arg === 'function' ? arg(tx) : Promise.all(arg))),
+    adminAuditLog: { create: jest.fn(async ({ data }: any) => { audit.push(data); return data; }) },
+    adminUser: { findMany: jest.fn(async () => []) },
   };
+  const audit: any[] = [];
+  const notified: any[] = [];
+  const notifications: any = { notifySafely: jest.fn(async (userId: string, _t: string, title: string) => { notified.push({ userId, title }); }) };
   const s3: any = {
     uploadPrivate: jest.fn(async (key: string) => { uploads.push(key); return key; }),
     signUrls: jest.fn(async (keys: string[]) => new Map(keys.map((k) => [k, `https://signed/${k}`]))),
   };
   const file = { mimetype: 'image/jpeg', buffer: Buffer.from('jpg') } as Express.Multer.File;
-  return { service: new CustomCardsService(prisma, s3), user, cards, uploads, ledger, file, inventoryUnequip };
+  return { service: new CustomCardsService(prisma, s3, notifications), user, cards, uploads, ledger, file, inventoryUnequip, audit, notified };
 }
 
 describe('CustomCardsService', () => {
@@ -86,7 +91,7 @@ describe('CustomCardsService', () => {
   });
 
   it('rejecting gives the coins back once', async () => {
-    const { service, user, ledger, file } = setup({ coins: 40000 });
+    const { service, user, ledger, file, audit, notified } = setup({ coins: 40000 });
     const { card } = await service.create('u1', file);
     expect(user.coins).toBe(0);
     await expect(service.reject(card.id, 'admin1', 'Not allowed')).resolves.toMatchObject({ refunded: 40000 });
@@ -94,5 +99,8 @@ describe('CustomCardsService', () => {
     expect(ledger.at(-1)).toMatchObject({ type: 'REFUND', amount: 40000 });
     await expect(service.reject(card.id, 'admin1')).rejects.toThrow(NotFoundException);
     expect(user.coins).toBe(40000);
+    // The decision is audit-logged once and the player is told.
+    expect(audit.filter((a) => a.action === 'REJECT_CUSTOM_CARD')).toHaveLength(1);
+    expect(notified).toEqual([{ userId: 'u1', title: 'Custom card not approved' }]);
   });
 });

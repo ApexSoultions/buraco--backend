@@ -1,6 +1,6 @@
 import {
   LayoutDashboard, Users, Gamepad2, ShoppingBag, Tag, Megaphone, Settings2,
-  ScrollText, Trophy, Shield, BarChart2, UserCog, Flag, MessagesSquare, type LucideIcon,
+  ScrollText, Trophy, Shield, BarChart2, UserCog, Flag, MessagesSquare, ImageIcon, type LucideIcon,
 } from 'lucide-react';
 import type { AdminRole } from '@/lib/admin';
 
@@ -27,6 +27,7 @@ export const NAV: NavGroup[] = [
   { title: 'Moderation', items: [
     { href: '/reports', label: 'Reports', Icon: Flag, roles: STAFF },
     { href: '/global-chat', label: 'Global chat', Icon: MessagesSquare, roles: STAFF },
+    { href: '/custom-cards', label: 'Custom cards', Icon: ImageIcon, roles: STAFF },
   ] },
   { title: 'Community', items: [
     { href: '/clubs', label: 'Clans', Icon: Shield, roles: STAFF },
