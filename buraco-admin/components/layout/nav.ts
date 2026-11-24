@@ -1,6 +1,6 @@
 import {
   LayoutDashboard, Users, Gamepad2, ShoppingBag, Tag, Megaphone, Settings2,
-  ScrollText, Trophy, Shield, BarChart2, UserCog, Flag, MessagesSquare, ImageIcon, CreditCard, type LucideIcon,
+  ScrollText, Trophy, Shield, BarChart2, UserCog, Flag, MessagesSquare, ImageIcon, CreditCard, Award, Target, TrendingUp, type LucideIcon,
 } from 'lucide-react';
 import type { AdminRole } from '@/lib/admin';
 
@@ -40,6 +40,9 @@ export const NAV: NavGroup[] = [
   ] },
   { title: 'Content', items: [
     { href: '/missions', label: 'Missions', Icon: Trophy, roles: SUPER },
+    { href: '/achievements', label: 'Achievements', Icon: Award, roles: SUPER },
+    { href: '/clan-objectives', label: 'Clan objectives', Icon: Target, roles: SUPER },
+    { href: '/levels', label: 'Level table', Icon: TrendingUp, roles: SUPER },
   ] },
   { title: 'System', items: [
     { href: '/config', label: 'Game settings', Icon: Settings2, roles: SUPER },

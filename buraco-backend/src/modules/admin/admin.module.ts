@@ -13,11 +13,13 @@ import { AdminReportsController } from './admin-reports.controller';
 import { AdminReportsService } from './admin-reports.service';
 import { AdminEconomyController } from './admin-economy.controller';
 import { AdminEconomyService } from './admin-economy.service';
+import { AdminContentController } from './admin-content.controller';
+import { AdminContentService } from './admin-content.service';
 
 @Module({
   imports: [PrismaModule, JwtModule.register({}), SystemConfigModule, TablesModule],
-  controllers: [AdminController, AdminAccountsController, AdminReportsController, AdminEconomyController],
-  providers: [AdminService, AdminAccountsService, AdminDashboardService, AdminPlayersService, AdminReportsService, AdminEconomyService],
+  controllers: [AdminController, AdminAccountsController, AdminReportsController, AdminEconomyController, AdminContentController],
+  providers: [AdminService, AdminAccountsService, AdminDashboardService, AdminPlayersService, AdminReportsService, AdminEconomyService, AdminContentService],
   exports: [AdminService],
 })
 export class AdminModule {}

@@ -149,8 +149,13 @@ export class StatsService {
   }
 
   private xpForNextLevel(level: number): number {
-    if (level <= 10) return level * 100;
-    if (level <= 30) return level * 200;
-    return level * 350;
+    return xpForNextLevel(level);
   }
+}
+
+/** XP a player needs to go from `level` to the next one (also used by the admin level table). */
+export function xpForNextLevel(level: number): number {
+  if (level <= 10) return level * 100;
+  if (level <= 30) return level * 200;
+  return level * 350;
 }

@@ -252,7 +252,7 @@ export default function MissionsPage() {
 
       {showCreate && (
         <Modal title="New Mission" onClose={() => setShowCreate(false)}>
-          <MissionForm />
+          {MissionForm()}
           <div className="flex justify-end gap-2 mt-5">
             <Button variant="outline" onClick={() => setShowCreate(false)}>Cancel</Button>
             <Button onClick={submitCreate} loading={saving} disabled={!form.title || !form.description}>Create</Button>
@@ -262,7 +262,7 @@ export default function MissionsPage() {
 
       {!!editTarget && (
         <Modal title="Edit Mission" onClose={() => setEditTarget(null)}>
-          <MissionForm />
+          {MissionForm()}
           <div className="flex justify-end gap-2 mt-5">
             <Button variant="outline" onClick={() => setEditTarget(null)}>Cancel</Button>
             <Button onClick={submitEdit} loading={saving} disabled={!form.title || !form.description}>Save Changes</Button>
