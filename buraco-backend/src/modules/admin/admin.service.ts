@@ -37,9 +37,14 @@ export class AdminService {
     if (!admin) throw new UnauthorizedException('INVALID_CREDENTIALS');
 
     const valid = await bcrypt.compare(dto.password, admin.passwordHash);
-    if (!valid) throw new UnauthorizedException('INVALID_CREDENTIALS');
+    if (!valid) {
+      // A wrong password on a real account is worth knowing about (someone guessing).
+      await this.audit(admin.id, 'ADMIN_LOGIN_FAILED', 'AdminUser', admin.id, {}).catch(() => undefined);
+      throw new UnauthorizedException('INVALID_CREDENTIALS');
+    }
 
     await this.prisma.adminUser.update({ where: { id: admin.id }, data: { lastLoginAt: new Date() } });
+    await this.audit(admin.id, 'ADMIN_LOGIN', 'AdminUser', admin.id, {}).catch(() => undefined);
 
     const token = this.jwt.sign(
       { sub: admin.id, email: admin.email, role: admin.role },
@@ -188,7 +193,12 @@ export class AdminService {
     const m = await this.prisma.mission.findUnique({ where: { id: missionId } });
     if (!m) throw new NotFoundException('Mission not found');
     const updated = await this.prisma.mission.update({ where: { id: missionId }, data: dto });
-    await this.audit(adminId, 'UPDATE_MISSION', 'Mission', missionId, { title: updated.title });
+    const changes: Record<string, [unknown, unknown]> = {};
+    for (const [k, v] of Object.entries(dto)) {
+      const before = (m as Record<string, unknown>)[k];
+      if (v !== undefined && before !== v) changes[k] = [before ?? null, v];
+    }
+    await this.audit(adminId, 'UPDATE_MISSION', 'Mission', missionId, { title: updated.title, changes });
     return updated;
   }
 
@@ -327,21 +337,6 @@ export class AdminService {
     });
     await this.audit(adminId, 'SET_PLAYER_SCORE', 'PlayerStats', userId, { points, level });
     return { message: 'Score updated' };
-  }
-
-  // ─── Audit Logs ───────────────────────────────────────────────────────────
-
-  async getAuditLogs(page: number, limit: number) {
-    const [data, total] = await Promise.all([
-      this.prisma.adminAuditLog.findMany({
-        skip: (page - 1) * limit,
-        take: limit,
-        orderBy: { createdAt: 'desc' },
-        include: { admin: { select: { name: true, email: true, role: true } } },
-      }),
-      this.prisma.adminAuditLog.count(),
-    ]);
-    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────────

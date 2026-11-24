@@ -325,15 +325,4 @@ export class AdminController {
   deleteMission(@CurrentUser('id') adminId: string, @Param('missionId') missionId: string) {
     return this.adminService.deleteMission(adminId, missionId);
   }
-
-  // ─── Audit Logs ───────────────────────────────────────────────────────────
-
-  @Get('audit-logs')
-  @UseGuards(AdminJwtGuard, AdminRolesGuard)
-  @AdminRoles(AdminRole.SUPER_ADMIN)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get admin audit logs' })
-  getAuditLogs(@Query('page') page = 1, @Query('limit') limit = 50) {
-    return this.adminService.getAuditLogs(+page, +limit);
-  }
 }
