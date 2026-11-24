@@ -263,60 +263,6 @@ export class AdminController {
     return this.adminService.setConfig(adminId, key, dto);
   }
 
-  // ─── Clubs ────────────────────────────────────────────────────────────────
-
-  @Get('clubs')
-  @UseGuards(AdminJwtGuard)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'List all clubs with pagination and search' })
-  @ApiQuery({ name: 'page',   required: false, type: Number })
-  @ApiQuery({ name: 'limit',  required: false, type: Number })
-  @ApiQuery({ name: 'search', required: false, type: String })
-  @ApiResponse({ status: 200, description: 'Paginated club list' })
-  listClubs(@Query('page') page = 1, @Query('limit') limit = 20, @Query('search') search?: string) {
-    return this.adminService.listClubs(+page, +limit, search);
-  }
-
-  @Get('clubs/:clubId')
-  @UseGuards(AdminJwtGuard)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get club detail with all members' })
-  @ApiParam({ name: 'clubId', description: 'Club UUID' })
-  @ApiResponse({ status: 200, description: 'Club with members' })
-  @ApiResponse({ status: 404, description: 'Club not found' })
-  getClub(@Param('clubId') clubId: string) {
-    return this.adminService.getClub(clubId);
-  }
-
-  @Delete('clubs/:clubId')
-  @UseGuards(AdminJwtGuard, AdminRolesGuard)
-  @AdminRoles(AdminRole.SUPER_ADMIN, AdminRole.MODERATOR)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'Delete a club permanently' })
-  @ApiParam({ name: 'clubId', description: 'Club UUID' })
-  @ApiResponse({ status: 200, description: 'Club deleted' })
-  @ApiResponse({ status: 404, description: 'Club not found' })
-  deleteClub(@CurrentUser('id') adminId: string, @Param('clubId') clubId: string) {
-    return this.adminService.deleteClub(adminId, clubId);
-  }
-
-  @Delete('clubs/:clubId/members/:userId')
-  @UseGuards(AdminJwtGuard, AdminRolesGuard)
-  @AdminRoles(AdminRole.SUPER_ADMIN, AdminRole.MODERATOR)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'Remove a member from a club' })
-  @ApiParam({ name: 'clubId', description: 'Club UUID' })
-  @ApiParam({ name: 'userId', description: 'Member player UUID' })
-  @ApiResponse({ status: 200, description: 'Member removed' })
-  @ApiResponse({ status: 404, description: 'Member not found' })
-  removeClubMember(
-    @CurrentUser('id') adminId: string,
-    @Param('clubId') clubId: string,
-    @Param('userId') userId: string,
-  ) {
-    return this.adminService.removeClubMember(adminId, clubId, userId);
-  }
-
   // ─── Leaderboard ──────────────────────────────────────────────────────────
 
   @Get('leaderboard')

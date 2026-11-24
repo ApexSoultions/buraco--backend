@@ -3,6 +3,7 @@ import { JwtModule } from '@nestjs/jwt';
 import { PrismaModule } from '../../common/prisma/prisma.module';
 import { SystemConfigModule } from '../../common/system-config/system-config.module';
 import { TablesModule } from '../tables/tables.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { AdminService } from './admin.service';
 import { AdminController } from './admin.controller';
 import { AdminAccountsController } from './admin-accounts.controller';
@@ -15,11 +16,13 @@ import { AdminEconomyController } from './admin-economy.controller';
 import { AdminEconomyService } from './admin-economy.service';
 import { AdminContentController } from './admin-content.controller';
 import { AdminContentService } from './admin-content.service';
+import { AdminClubsController } from './admin-clubs.controller';
+import { AdminClubsService } from './admin-clubs.service';
 
 @Module({
-  imports: [PrismaModule, JwtModule.register({}), SystemConfigModule, TablesModule],
-  controllers: [AdminController, AdminAccountsController, AdminReportsController, AdminEconomyController, AdminContentController],
-  providers: [AdminService, AdminAccountsService, AdminDashboardService, AdminPlayersService, AdminReportsService, AdminEconomyService, AdminContentService],
+  imports: [PrismaModule, JwtModule.register({}), SystemConfigModule, TablesModule, NotificationsModule],
+  controllers: [AdminController, AdminAccountsController, AdminReportsController, AdminEconomyController, AdminContentController, AdminClubsController],
+  providers: [AdminService, AdminAccountsService, AdminDashboardService, AdminPlayersService, AdminReportsService, AdminEconomyService, AdminContentService, AdminClubsService],
   exports: [AdminService],
 })
 export class AdminModule {}

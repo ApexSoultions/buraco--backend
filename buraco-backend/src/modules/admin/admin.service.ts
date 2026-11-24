@@ -199,55 +199,6 @@ export class AdminService {
     return cfg;
   }
 
-  // ─── Clubs ────────────────────────────────────────────────────────────────
-
-  async listClubs(page: number, limit: number, search?: string) {
-    const where = search
-      ? { name: { contains: search, mode: 'insensitive' as const } }
-      : {};
-    const [data, total] = await Promise.all([
-      this.prisma.club.findMany({
-        where,
-        skip: (page - 1) * limit,
-        take: limit,
-        orderBy: { createdAt: 'desc' },
-      }),
-      this.prisma.club.count({ where }),
-    ]);
-    return { data, total, page, limit, totalPages: Math.ceil(total / limit) };
-  }
-
-  async getClub(clubId: string) {
-    const club = await this.prisma.club.findUnique({
-      where: { id: clubId },
-      include: {
-        members: {
-          include: { user: { select: { username: true, email: true } } },
-          orderBy: { joinedAt: 'asc' },
-        },
-      },
-    });
-    if (!club) throw new NotFoundException('Club not found');
-    return club;
-  }
-
-  async deleteClub(adminId: string, clubId: string) {
-    const club = await this.prisma.club.findUnique({ where: { id: clubId } });
-    if (!club) throw new NotFoundException('Club not found');
-    await this.prisma.club.delete({ where: { id: clubId } });
-    await this.audit(adminId, 'DELETE_CLUB', 'Club', clubId, { name: club.name });
-    return { message: `Club "${club.name}" deleted` };
-  }
-
-  async removeClubMember(adminId: string, clubId: string, userId: string) {
-    const member = await this.prisma.clubMember.findUnique({ where: { clubId_userId: { clubId, userId } } });
-    if (!member) throw new NotFoundException('Member not found');
-    await this.prisma.clubMember.delete({ where: { clubId_userId: { clubId, userId } } });
-    await this.prisma.club.update({ where: { id: clubId }, data: { memberCount: { decrement: 1 } } });
-    await this.audit(adminId, 'REMOVE_CLUB_MEMBER', 'ClubMember', userId, { clubId });
-    return { message: 'Member removed' };
-  }
-
   // ─── Missions ─────────────────────────────────────────────────────────────
 
   async listMissions() {
