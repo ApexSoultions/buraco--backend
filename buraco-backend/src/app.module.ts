@@ -36,6 +36,7 @@ import { MatchHistoryModule } from './modules/match-history/match-history.module
 import { AdminModule } from './modules/admin/admin.module';
 import { CloudScriptingModule } from './modules/cloud-scripting/cloud-scripting.module';
 import { ReconnectionModule } from './modules/reconnection/reconnection.module';
+import { SupportModule } from './modules/support/support.module';
 import { MailModule } from './common/mail/mail.module';
 import { AppGateway } from './websocket/gateway';
 
@@ -90,6 +91,7 @@ import { AppGateway } from './websocket/gateway';
     AdminModule,
     CloudScriptingModule,
     ReconnectionModule,
+    SupportModule,
     MailModule,
   ],
   providers: [

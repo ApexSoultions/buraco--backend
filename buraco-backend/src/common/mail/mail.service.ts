@@ -57,6 +57,29 @@ export class MailService {
     }
   }
 
+  /** The answer to a player's message to Game Support. Everything from the player is escaped. */
+  async sendSupportReply(email: string, name: string, original: string, reply: string): Promise<void> {
+    const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+    try {
+      const transporter = await this.getTransporter();
+      await transporter.sendMail({
+        from: await this.getFromAddress(),
+        to: email,
+        subject: 'Your message to Game Support',
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 480px; margin: auto;">
+            <p>Hello ${esc(name)},</p>
+            <p>${esc(reply)}</p>
+            <hr style="border: none; border-top: 1px solid #ddd; margin: 24px 0;">
+            <p style="color: #777; font-size: 13px;">Your message:<br>${esc(original)}</p>
+          </div>
+        `,
+      });
+    } catch (err) {
+      this.logger.error(`Failed to send support reply email to ${email}`, err);
+    }
+  }
+
   async sendWelcome(email: string, username: string): Promise<void> {
     try {
       const transporter = await this.getTransporter();

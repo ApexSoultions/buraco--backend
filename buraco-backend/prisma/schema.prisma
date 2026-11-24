@@ -230,6 +230,7 @@ model User {
   reportsMade         Report[]             @relation("ReportsMade")
   reportsReceived     Report[]             @relation("ReportsReceived")
   iapPurchases        IapPurchase[]
+  supportTickets      SupportTicket[]
   iapSubscriptions    IapSubscription[]
   promoRedemptions    PromoRedemption[]
   customCards         CustomCard[]
@@ -1011,4 +1012,48 @@ model IapSubscription {
   @@unique([store, originalId])
   @@index([userId])
   @@map("iap_subscriptions")
+}
+
+enum SupportStatus {
+  OPEN
+  ANSWERED
+  CLOSED
+}
+
+/// A player's message to the game staff ("Contact Game Support" in Settings). Staff answer it
+/// in the admin panel; the player gets the answer as a game notification and by email.
+model SupportTicket {
+  id        String        @id @default(uuid())
+  userId    String
+  user      User          @relation(fields: [userId], references: [id])
+  name      String
+  email     String
+  /// Optional other way to reach the player (Instagram, Facebook, X handle).
+  social    String?
+  message   String
+  status    SupportStatus @default(OPEN)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  closedAt  DateTime?
+  closedBy  String?
+
+  replies SupportReply[]
+
+  @@index([status, createdAt])
+  @@index([userId, createdAt])
+  @@map("support_tickets")
+}
+
+model SupportReply {
+  id        String        @id @default(uuid())
+  ticketId  String
+  ticket    SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  adminId   String
+  /// The staff member's name when they answered (kept even if the account changes later).
+  adminName String
+  message   String
+  createdAt DateTime      @default(now())
+
+  @@index([ticketId, createdAt])
+  @@map("support_replies")
 }
