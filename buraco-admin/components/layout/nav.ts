@@ -1,6 +1,6 @@
 import {
   LayoutDashboard, Users, Gamepad2, ShoppingBag, Tag, Megaphone, Settings2,
-  ScrollText, Trophy, Shield, BarChart2, UserCog, Flag, MessagesSquare, ImageIcon, type LucideIcon,
+  ScrollText, Trophy, Shield, BarChart2, UserCog, Flag, MessagesSquare, ImageIcon, CreditCard, type LucideIcon,
 } from 'lucide-react';
 import type { AdminRole } from '@/lib/admin';
 
@@ -36,6 +36,7 @@ export const NAV: NavGroup[] = [
   { title: 'Economy', items: [
     { href: '/shop', label: 'Shop', Icon: ShoppingBag, roles: SUPER },
     { href: '/promos', label: 'Promo codes', Icon: Tag, roles: SUPER },
+    { href: '/purchases', label: 'Store purchases', Icon: CreditCard, roles: SUPER },
   ] },
   { title: 'Content', items: [
     { href: '/missions', label: 'Missions', Icon: Trophy, roles: SUPER },
