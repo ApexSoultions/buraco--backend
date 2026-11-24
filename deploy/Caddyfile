@@ -1,0 +1,11 @@
+# Caddy: HTTPS for the admin panel. Copy to /etc/caddy/Caddyfile on the server.
+#
+# The address is a free sslip.io name that points at the server's IP (no account, no domain).
+# Caddy gets its Let's Encrypt certificate by itself. It needs ports 80 and 443 open in the AWS
+# security group. If the server's IP ever changes, change the IP in this name (dots become dashes).
+# When the client has a real domain, only this first line changes.
+admin.13-232-172-199.sslip.io {
+	encode gzip
+	# The panel (pm2 process "buraco-admin") only listens on this local port.
+	reverse_proxy 127.0.0.1:3100
+}
