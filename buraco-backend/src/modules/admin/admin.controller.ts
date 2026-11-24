@@ -16,9 +16,7 @@ import { AdjustLivesDto } from './dto/admin-players.dto';
 import { AdminLoginDto } from './dto/admin-login.dto';
 import { BanUserDto } from './dto/ban-user.dto';
 import { CreditUserDto } from './dto/credit-user.dto';
-import { BroadcastDto } from './dto/broadcast.dto';
 import { CreatePromoDto } from './dto/create-promo.dto';
-import { SystemConfigDto } from './dto/system-config.dto';
 import { CreateShopItemDto } from './dto/create-shop-item.dto';
 import { EditUserDto } from './dto/edit-user.dto';
 import { CreateMissionDto } from './dto/create-mission.dto';
@@ -231,36 +229,6 @@ export class AdminController {
   @ApiOperation({ summary: 'Activate or deactivate a promo code' })
   togglePromo(@CurrentUser('id') adminId: string, @Param('promoId') promoId: string, @Body('isActive') isActive: boolean) {
     return this.adminService.togglePromo(adminId, promoId, isActive);
-  }
-
-  // ─── Broadcast ────────────────────────────────────────────────────────────
-
-  @Post('broadcast')
-  @UseGuards(AdminJwtGuard, AdminRolesGuard)
-  @AdminRoles(AdminRole.SUPER_ADMIN, AdminRole.MODERATOR)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'Send broadcast notification to all users' })
-  broadcast(@CurrentUser('id') adminId: string, @Body() dto: BroadcastDto) {
-    return this.adminService.broadcast(adminId, dto);
-  }
-
-  // ─── Config ───────────────────────────────────────────────────────────────
-
-  @Get('config')
-  @UseGuards(AdminJwtGuard)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'List all system config keys' })
-  listConfig() {
-    return this.adminService.listConfig();
-  }
-
-  @Put('config/:key')
-  @UseGuards(AdminJwtGuard, AdminRolesGuard)
-  @AdminRoles(AdminRole.SUPER_ADMIN)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'Set a system config value' })
-  setConfig(@CurrentUser('id') adminId: string, @Param('key') key: string, @Body() dto: SystemConfigDto) {
-    return this.adminService.setConfig(adminId, key, dto);
   }
 
   // ─── Leaderboard ──────────────────────────────────────────────────────────

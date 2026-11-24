@@ -18,11 +18,14 @@ import { AdminContentController } from './admin-content.controller';
 import { AdminContentService } from './admin-content.service';
 import { AdminClubsController } from './admin-clubs.controller';
 import { AdminClubsService } from './admin-clubs.service';
+import { AdminSettingsController } from './admin-settings.controller';
+import { AdminSettingsService } from './admin-settings.service';
+import { AdminBroadcastService } from './admin-broadcast.service';
 
 @Module({
   imports: [PrismaModule, JwtModule.register({}), SystemConfigModule, TablesModule, NotificationsModule],
-  controllers: [AdminController, AdminAccountsController, AdminReportsController, AdminEconomyController, AdminContentController, AdminClubsController],
-  providers: [AdminService, AdminAccountsService, AdminDashboardService, AdminPlayersService, AdminReportsService, AdminEconomyService, AdminContentService, AdminClubsService],
+  controllers: [AdminController, AdminAccountsController, AdminReportsController, AdminEconomyController, AdminContentController, AdminClubsController, AdminSettingsController],
+  providers: [AdminService, AdminAccountsService, AdminDashboardService, AdminPlayersService, AdminReportsService, AdminEconomyService, AdminContentService, AdminClubsService, AdminSettingsService, AdminBroadcastService],
   exports: [AdminService],
 })
 export class AdminModule {}

@@ -15,9 +15,7 @@ import { SocketService } from '../../common/socket/socket.service';
 import { AdminLoginDto } from './dto/admin-login.dto';
 import { BanUserDto } from './dto/ban-user.dto';
 import { CreditUserDto } from './dto/credit-user.dto';
-import { BroadcastDto } from './dto/broadcast.dto';
 import { CreatePromoDto } from './dto/create-promo.dto';
-import { SystemConfigDto } from './dto/system-config.dto';
 import { CreateShopItemDto } from './dto/create-shop-item.dto';
 import { EditUserDto } from './dto/edit-user.dto';
 import { CreateMissionDto } from './dto/create-mission.dto';
@@ -154,49 +152,6 @@ export class AdminService {
     const updated = await this.prisma.promoCode.update({ where: { id: promoId }, data: { isActive } });
     await this.audit(adminId, isActive ? 'ACTIVATE_PROMO' : 'DEACTIVATE_PROMO', 'PromoCode', promoId, {});
     return updated;
-  }
-
-  // ─── Broadcast ────────────────────────────────────────────────────────────
-
-  async broadcast(adminId: string, dto: BroadcastDto) {
-    const users = await this.prisma.user.findMany({ where: { isDeleted: false, isBanned: false }, select: { id: true } });
-
-    await this.prisma.notification.createMany({
-      data: users.map((u) => ({
-        userId: u.id,
-        type: NotificationType.BROADCAST,
-        title: dto.title,
-        body: dto.body,
-        data: dto.data ?? {},
-      })),
-    });
-
-    // One live event for everyone online instead of a per-user lookup; clients re-fetch
-    // GET /notifications/unread-count for the badge.
-    this.socketService.emitToAll('notification:new', {
-      notification: { type: NotificationType.BROADCAST, title: dto.title, body: dto.body, data: dto.data ?? {}, createdAt: new Date().toISOString() },
-      unreadCount: null,
-    });
-
-    await this.audit(adminId, 'BROADCAST', 'Notification', 'all', { title: dto.title, recipientCount: users.length });
-    return { message: `Broadcast sent to ${users.length} users` };
-  }
-
-  // ─── System Config ────────────────────────────────────────────────────────
-
-  async listConfig() {
-    return this.prisma.systemConfig.findMany({ orderBy: { key: 'asc' } });
-  }
-
-  async setConfig(adminId: string, key: string, dto: SystemConfigDto) {
-    const cfg = await this.prisma.systemConfig.upsert({
-      where: { key },
-      update: { value: dto.value, updatedBy: adminId },
-      create: { key, value: dto.value, updatedBy: adminId },
-    });
-    this.sysConfig.invalidate(key);
-    await this.audit(adminId, 'UPDATE_CONFIG', 'SystemConfig', key, { value: dto.value });
-    return cfg;
   }
 
   // ─── Missions ─────────────────────────────────────────────────────────────
