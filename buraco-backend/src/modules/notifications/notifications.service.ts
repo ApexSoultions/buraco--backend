@@ -85,7 +85,27 @@ export class NotificationsService {
       this.prisma.notification.findMany({ where, skip, take: limit, orderBy: { createdAt: 'desc' } }),
       this.prisma.notification.count({ where }),
     ]);
-    return { data, meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
+    return { data: await this.withCurrentPictures(data), meta: { total, page, limit, totalPages: Math.ceil(total / limit) } };
+  }
+
+  /**
+   * A notification from a player (friend request, invite) saved that player's picture when it
+   * was sent. Show their CURRENT picture, so they look the same everywhere.
+   */
+  private async withCurrentPictures<T extends { data: unknown }>(rows: T[]): Promise<T[]> {
+    const fromId = (r: T) => {
+      const d = r.data as Record<string, unknown> | null;
+      return d && typeof d.fromUserId === 'string' ? d.fromUserId : null;
+    };
+    const ids = [...new Set(rows.map(fromId).filter((x): x is string => !!x))];
+    if (ids.length === 0) return rows;
+    const users = await this.prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, avatarUrl: true } });
+    const pictures = new Map(users.map((u) => [u.id, u.avatarUrl ?? null]));
+    return rows.map((r) => {
+      const id = fromId(r);
+      if (!id || !pictures.has(id)) return r;
+      return { ...r, data: { ...(r.data as Record<string, unknown>), fromAvatarUrl: pictures.get(id) ?? null } };
+    });
   }
 
   async getUnreadCount(userId: string) {

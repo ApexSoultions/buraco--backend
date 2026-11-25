@@ -3,6 +3,7 @@ import { GlobalChatService, GLOBAL_CHAT_HISTORY, GLOBAL_CHAT_ROOM } from './glob
 
 function setup(opts: { blocked?: string[] } = {}) {
   const kv = new Map<string, string>();
+  const pictures = new Map<string, string | null>();
   const redis = {
     get: jest.fn(async (k: string) => kv.get(k) ?? null),
     set: jest.fn(async (k: string, v: string) => { kv.set(k, v); return 'OK'; }),
@@ -10,13 +11,16 @@ function setup(opts: { blocked?: string[] } = {}) {
     getJson: jest.fn(async (k: string) => (kv.has(k) ? JSON.parse(kv.get(k)!) : null)),
   };
   const prisma = {
-    user: { findUnique: jest.fn(async ({ where }: any) => ({ username: where.id.replace('-id', ''), avatarUrl: null })) },
+    user: {
+      findUnique: jest.fn(async ({ where }: any) => ({ username: where.id.replace('-id', ''), avatarUrl: pictures.get(where.id) ?? null })),
+      findMany: jest.fn(async ({ where }: any) => where.id.in.map((id: string) => ({ id, avatarUrl: pictures.get(id) ?? null }))),
+    },
     block: { findMany: jest.fn(async () => (opts.blocked ?? []).map((blockedId) => ({ blockedId }))) },
     report: { create: jest.fn(async () => ({})) },
   };
   const socket = { emitToRoom: jest.fn() };
   const service = new GlobalChatService(prisma as any, redis as any, socket as any);
-  return { service, prisma, socket };
+  return { service, prisma, socket, pictures };
 }
 
 describe('GlobalChatService', () => {
@@ -26,6 +30,15 @@ describe('GlobalChatService', () => {
     expect(msg).toMatchObject({ senderId: 'alice-id', username: 'alice', kind: 'TEXT', text: 'hi all' });
     expect(socket.emitToRoom).toHaveBeenCalledWith(GLOBAL_CHAT_ROOM, 'lobby:chat:message', msg);
     expect((await service.history('bob-id')).messages).toEqual([msg]);
+  });
+
+  it('the history shows each sender\'s current picture, not the one the message was sent with', async () => {
+    const { service, pictures } = setup();
+    pictures.set('alice-id', 'https://s3/old.png');
+    await service.send('alice-id', { text: 'hello' });
+    pictures.set('alice-id', '/avatars/predefined/002.png'); // Alice chose a new picture later
+    const [m] = (await service.history('bob-id')).messages;
+    expect(m.avatarUrl).toBe('/avatars/predefined/002.png');
   });
 
   it('rejects empty, too long and unknown kinds', async () => {

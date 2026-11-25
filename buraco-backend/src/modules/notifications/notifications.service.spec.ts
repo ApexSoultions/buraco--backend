@@ -70,3 +70,26 @@ describe('NotificationsService.notifySafely', () => {
     expect(prisma.notification.createManyAndReturn).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('NotificationsService — list', () => {
+  it("shows the sender's current picture, not the one saved when the notification was sent", async () => {
+    const prisma = {
+      notification: {
+        findMany: jest.fn(async () => [
+          { id: 'n1', data: { requestId: 'r1', fromUserId: BOB, fromUsername: 'bob', fromAvatarUrl: 'https://s3/old.png' } },
+          { id: 'n2', data: { event: 'SUPPORT_REPLY' } },
+          { id: 'n3', data: null },
+        ]),
+        count: jest.fn(async () => 3),
+      },
+      user: { findMany: jest.fn(async () => [{ id: BOB, avatarUrl: '/avatars/predefined/003.png' }]) },
+    };
+    const service = new NotificationsService(prisma as any, { emitToUsers: jest.fn() } as any);
+    const res = await service.getNotifications(ALICE);
+    expect((res.data[0].data as any).fromAvatarUrl).toBe('/avatars/predefined/003.png');
+    expect((res.data[0].data as any).fromUsername).toBe('bob');
+    expect(res.data[1].data).toEqual({ event: 'SUPPORT_REPLY' });
+    expect(res.data[2].data).toBeNull();
+    expect(prisma.user.findMany).toHaveBeenCalledTimes(1);
+  });
+});

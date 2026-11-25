@@ -72,7 +72,16 @@ export class GlobalChatService {
     const blocks = await this.prisma.block.findMany({ where: { blockerId: userId }, select: { blockedId: true } });
     const hidden = new Set(blocks.map((b) => b.blockedId));
     const messages = list.filter((m) => !hidden.has(m.senderId) && (!cleared || m.sentAt > cleared));
-    return { messages, blockedIds: [...hidden] };
+    return { messages: await this.withCurrentPictures(messages), blockedIds: [...hidden] };
+  }
+
+  /** The sender's current picture (a message keeps the one it was sent with). */
+  private async withCurrentPictures(messages: GlobalChatMessage[]) {
+    const ids = [...new Set(messages.map((m) => m.senderId))];
+    if (ids.length === 0) return messages;
+    const users = await this.prisma.user.findMany({ where: { id: { in: ids } }, select: { id: true, avatarUrl: true } });
+    const pictures = new Map(users.map((u) => [u.id, u.avatarUrl ?? null]));
+    return messages.map((m) => (pictures.has(m.senderId) ? { ...m, avatarUrl: pictures.get(m.senderId) ?? null } : m));
   }
 
   /** "Clear": hide everything sent until now, for me only. */
